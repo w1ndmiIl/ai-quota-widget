@@ -43,3 +43,34 @@ test("keeps compact window and renderer dimensions synchronized", () => {
   assert.match(cssSource, /body\.compact \.quota-side \{[\s\S]*?padding: 0 34px 0 0;/);
   assert.match(cssSource, /body\.compact \.quota-list \{[\s\S]*?gap: 8px;/);
 });
+
+test("wires popular agent sources through settings and model filtering", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "index.html"), "utf8");
+  const renderer = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "renderer.js"), "utf8");
+  const main = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+
+  for (const id of ["cfgOpenCode", "cfgGeminiCli", "cfgCline", "labelOpenCode", "labelGeminiCli", "labelCline"]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  const openCodeIndex = renderer.indexOf('{ key: "opencode", label: "OpenCode" }');
+  const geminiIndex = renderer.indexOf('{ key: "gemini", label: "Gemini CLI" }');
+  const clineIndex = renderer.indexOf('{ key: "cline", label: "Cline" }');
+  assert.ok(openCodeIndex < geminiIndex && geminiIndex < clineIndex);
+  for (const setting of ["enableOpenCode", "enableGeminiCli", "enableCline"]) {
+    assert.match(renderer, new RegExp(setting));
+    assert.match(main, new RegExp(setting));
+  }
+  assert.match(renderer, /labelOpenCode: "OpenCode Local Sessions"/);
+  assert.match(renderer, /labelGeminiCli: "Gemini CLI Local Sessions"/);
+  assert.match(renderer, /labelCline: "Cline Local Logs"/);
+});
+
+test("loads pure model aggregation before the renderer and memoizes menu rebuilds", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "index.html"), "utf8");
+  const renderer = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "renderer.js"), "utf8");
+  assert.ok(html.indexOf('src="./model-usage.js"') < html.indexOf('src="./renderer.js"'));
+  assert.ok(html.indexOf('src="./ui-interactions.js"') < html.indexOf('src="./renderer.js"'));
+  assert.match(renderer, /if \(nextSignature === modelMenuSignature\) return;/);
+  assert.match(renderer, /window\.addEventListener\("resize", scheduleToggleSliderUpdate\)/);
+  assert.match(renderer, /requestAnimationFrame\(\(\) =>/);
+});

@@ -1,8 +1,12 @@
 "use strict";
 
+const { buildMergedModels, getTokenForModel, parseModelSelection } = window.ModelUsage;
+const { createModalController, nextRovingIndex } = window.UiInteractions;
+
 const elements = {
   shell: document.getElementById("shell"),
   updatedAt: document.getElementById("updatedAt"),
+  appStatus: document.getElementById("appStatus"),
   compactButton: document.getElementById("compactButton"),
   compactIcon: document.getElementById("compactIcon"),
   refreshButton: document.getElementById("refreshButton"),
@@ -43,6 +47,9 @@ const elements = {
   inputTokens: document.getElementById("inputTokens"),
   cachedTokens: document.getElementById("cachedTokens"),
   outputTokens: document.getElementById("outputTokens"),
+  inputLabel: document.getElementById("inputLabel"),
+  cachedLabel: document.getElementById("cachedLabel"),
+  outputLabel: document.getElementById("outputLabel"),
   tokenCost: document.getElementById("tokenCost"),
   tokenValueBox: document.getElementById("tokenValueBox"),
   tokenValueLabel: document.getElementById("tokenValueLabel"),
@@ -67,6 +74,8 @@ const elements = {
   tokenCardBody: document.getElementById("tokenCardBody")
 };
 
+const modalController = createModalController({ background: elements.shell });
+
 let isCompact = localStorage.getItem("compact") === "1";
 let tokenRange = localStorage.getItem("tokenRange") || "24h";
 let isRefreshing = false;
@@ -89,6 +98,9 @@ let initialDataReady = false;
 const MODEL_SOURCES = [
   { key: "codex", label: "Codex" },
   { key: "claude", label: "Claude Code" },
+  { key: "opencode", label: "OpenCode" },
+  { key: "gemini", label: "Gemini CLI" },
+  { key: "cline", label: "Cline" },
   { key: "antigravity", label: "Antigravity" }
 ];
 const expandedModelSources = new Set(MODEL_SOURCES.map((source) => source.key));
@@ -99,16 +111,11 @@ let historyRenderQueuedImmediate = false;
 let lastHistoryRenderAt = 0;
 let historyRenderingEnabled = false;
 const HISTORY_RENDER_INTERVAL = 60_000;
-
-function parseModelSelection(selection) {
-  if (selection === "all") return { kind: "all", source: null, model: "all" };
-  if (selection.startsWith("source:")) return { kind: "source", source: selection.slice(7), model: "all" };
-  const separator = selection.indexOf(":");
-  if (separator > 0) {
-    return { kind: "model", source: selection.slice(0, separator), model: selection.slice(separator + 1) || "all" };
-  }
-  return { kind: "model", source: null, model: selection };
-}
+const modelMeasureCanvas = document.createElement("canvas");
+let modelMenuSignature = "";
+let toggleSliderFrame = null;
+let chartTooltipFrame = null;
+let pendingChartTooltip = null;
 
 function modelSourceLabel(source) {
   return MODEL_SOURCES.find((item) => item.key === source)?.label || source;
@@ -117,7 +124,10 @@ function modelSourceLabel(source) {
 elements.closeButton.addEventListener("click", () => window.aiQuota.quitWindow());
 elements.compactButton.addEventListener("click", () => setCompact(!isCompact));
 elements.refreshButton.addEventListener("click", refresh);
-elements.resetRow.addEventListener("click", openResetDialog);
+elements.resetRow.addEventListener("click", (event) => {
+  event.stopPropagation();
+  openResetDialog();
+});
 elements.resetRow.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
@@ -129,12 +139,6 @@ elements.pinButton.addEventListener("click", async () => {
   const pinned = await window.aiQuota.toggleAlwaysOnTop();
   applyPinnedState(pinned);
 });
-const trendCard = document.querySelector(".trend-card");
-trendCard.addEventListener("click", (event) => {
-  event.stopPropagation();
-  toggleCardFocus(trendCard);
-});
-trendCard.addEventListener("keydown", activateWithKeyboard);
 elements.shell.addEventListener("click", (event) => {
   if (focusedCard && !event.target.closest(".is-focused")) {
     clearCardFocus();
@@ -145,9 +149,8 @@ elements.shell.addEventListener("click", (event) => {
   }
 });
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeModelPicker();
+  if (event.key === "Escape") closeModelPicker({ restoreFocus: true });
   if (event.key === "Escape") clearCardFocus();
-  if (event.key === "Escape") closeResetDialog();
 });
 
 window.aiQuota.onUpdated(render);
@@ -189,6 +192,9 @@ async function setupSettings() {
   const themeSelect = document.getElementById("themeSelect");
   const cfgCodex = document.getElementById("cfgCodex");
   const cfgClaudeCode = document.getElementById("cfgClaudeCode");
+  const cfgOpenCode = document.getElementById("cfgOpenCode");
+  const cfgGeminiCli = document.getElementById("cfgGeminiCli");
+  const cfgCline = document.getElementById("cfgCline");
   const cfgAntigravity = document.getElementById("cfgAntigravity");
   const settingsStatus = document.getElementById("settingsStatus");
   const settingsSave = document.getElementById("settingsSave");
@@ -199,7 +205,7 @@ async function setupSettings() {
     togglePin: document.getElementById("hotkeyTogglePin")
   };
 
-  let config = { enableCodex: true, enableClaudeCode: true, enableAntigravity: true, hotkeys: { ...DEFAULT_HOTKEYS } };
+  let config = { enableCodex: true, enableClaudeCode: true, enableOpenCode: true, enableGeminiCli: true, enableCline: true, enableAntigravity: true, hotkeys: { ...DEFAULT_HOTKEYS } };
   try {
     const mainConfig = await window.aiQuota.readSettings();
     if (mainConfig) {
@@ -281,20 +287,24 @@ async function setupSettings() {
     themeSelect.value = localStorage.getItem("theme") || "light";
     cfgCodex.checked = config.enableCodex;
     cfgClaudeCode.checked = config.enableClaudeCode;
+    cfgOpenCode.checked = config.enableOpenCode;
+    cfgGeminiCli.checked = config.enableGeminiCli;
+    cfgCline.checked = config.enableCline;
     cfgAntigravity.checked = config.enableAntigravity;
     setHotkeyValues(config.hotkeys);
     showSettingsStatus();
 
-    panel.classList.add("open");
-    panel.setAttribute("aria-hidden", "false");
-    document.getElementById("settingsClose").focus();
+    closeModelPicker();
+    clearCardFocus();
+    modalController.open(panel, {
+      initialFocus: document.getElementById("settingsClose"),
+      returnFocus: document.getElementById("settingsButton")
+    });
   });
 
   // Close
   function closeSettings() {
-    panel.classList.remove("open");
-    panel.setAttribute("aria-hidden", "true");
-    document.getElementById("settingsButton").focus();
+    modalController.close(panel);
   }
   document.getElementById("settingsClose").addEventListener("click", closeSettings);
   panel.querySelector(".settings-backdrop").addEventListener("click", closeSettings);
@@ -307,6 +317,9 @@ async function setupSettings() {
     const newConfig = {
       enableCodex: cfgCodex.checked,
       enableClaudeCode: cfgClaudeCode.checked,
+      enableOpenCode: cfgOpenCode.checked,
+      enableGeminiCli: cfgGeminiCli.checked,
+      enableCline: cfgCline.checked,
       enableAntigravity: cfgAntigravity.checked,
       hotkeys: {
         togglePanel: hotkeyInputs.togglePanel.value.trim(),
@@ -346,9 +359,6 @@ async function setupSettings() {
     closeSettings();
   });
 
-  window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && panel.classList.contains("open")) closeSettings();
-  });
 }
 
 function applyTheme(theme) {
@@ -384,6 +394,8 @@ const I18N = {
     tokenValuePartial: (models) => `仅包含已识别模型；未计价：${models}`,
     tokenValueUnavailable: "当前模型没有可用的公开 API 单价。",
     refreshTip: "手动刷新",
+    refreshing: "正在刷新数据",
+    refreshComplete: "数据已更新",
     pinTip: "置顶",
     unpinTip: "取消置顶",
     compactTip: "切换紧凑视图",
@@ -398,12 +410,16 @@ const I18N = {
     settingsClose: "关闭设置",
     allModels: "全部模型",
     sourceAll: "全部",
+    allSources: "全部来源",
     unknownModel: "未知模型",
     modelPickerAria: "选择统计模型",
     modelExpanderAria: (source) => `展开或收起 ${source} 模型`,
     sourceSectionTitle: "启用的数据源",
     labelCodex: "OpenAI Codex 额度与日志",
     labelClaudeCode: "Claude Code 本地日志",
+    labelOpenCode: "OpenCode 本地会话",
+    labelGeminiCli: "Gemini CLI 本地会话",
+    labelCline: "Cline 本地日志",
     labelAntigravity: "Antigravity 会话估算",
     hotkeySectionTitle: "快捷键",
     hotkeyHint: "点击输入框后按下组合键；留空可关闭对应快捷键。",
@@ -443,6 +459,9 @@ const I18N = {
     trend24Label: "近 24 小时",
     trend7Label: "近 7 天",
     recent30Days: "最近 30 天",
+    heatmapAria: "最近 42 天每日 Token 消耗，使用方向键浏览",
+    heatCellAria: (date, value) => `${date}，${value}`,
+    collapseHint: "再次点击或按 Esc 返回",
     hoursAgo: (hours) => `${hours}h 前`,
     now: "现在",
     sevenDayAverage: (value) => `7d 平均 ${value}`,
@@ -489,6 +508,8 @@ const I18N = {
     tokenValuePartial: (models) => `Known models only; not priced: ${models}`,
     tokenValueUnavailable: "No public API price is available for the current model.",
     refreshTip: "Refresh",
+    refreshing: "Refreshing data",
+    refreshComplete: "Data updated",
     pinTip: "Pin",
     unpinTip: "Unpin",
     compactTip: "Compact view",
@@ -503,12 +524,16 @@ const I18N = {
     settingsClose: "Close settings",
     allModels: "All Models",
     sourceAll: "All",
+    allSources: "All Sources",
     unknownModel: "Unknown",
     modelPickerAria: "Select usage model",
     modelExpanderAria: (source) => `Expand or collapse ${source} models`,
     sourceSectionTitle: "Data Sources",
     labelCodex: "OpenAI Codex Quota & Logs",
     labelClaudeCode: "Claude Code Local Logs",
+    labelOpenCode: "OpenCode Local Sessions",
+    labelGeminiCli: "Gemini CLI Local Sessions",
+    labelCline: "Cline Local Logs",
     labelAntigravity: "Antigravity Session Estimates",
     hotkeySectionTitle: "Shortcuts",
     hotkeyHint: "Click an input, then press a key combination. Leave it empty to disable that shortcut.",
@@ -548,6 +573,9 @@ const I18N = {
     trend24Label: "Last 24 Hours",
     trend7Label: "Last 7 Days",
     recent30Days: "Last 30 Days",
+    heatmapAria: "Daily token usage for the last 42 days; use arrow keys to browse",
+    heatCellAria: (date, value) => `${date}, ${value}`,
+    collapseHint: "Click again or press Esc to return",
     hoursAgo: (hours) => `${hours}h ago`,
     now: "Now",
     sevenDayAverage: (value) => `7d avg ${value}`,
@@ -574,6 +602,7 @@ let i18n = I18N.zh;
 // Startup helpers render translated labels, so they must run after i18n exists.
 setupSettings();
 setupModelSelect();
+setupExpandableCards();
 setupRingLayers();
 renderBar(elements.shortBar, 0, "gray");
 renderBar(elements.longBar, 0, "gray");
@@ -641,6 +670,7 @@ function applyLang(lang) {
     set("hitTrendLabel", "recent30Days");
     set("heatLow", "low");
     set("heatHigh", "high");
+    setAttribute("hitHeatmap", "aria-label", t("heatmapAria"));
     setAttribute("trend24Chart", "aria-label", `${t("trend24Label")} Token`);
     setAttribute("trend7Chart", "aria-label", `${t("trend7Label")} Token`);
     set("langLabel", "langLabel");
@@ -662,6 +692,9 @@ function applyLang(lang) {
     set("sourceSectionTitle", "sourceSectionTitle");
     set("labelCodex", "labelCodex");
     set("labelClaudeCode", "labelClaudeCode");
+    set("labelOpenCode", "labelOpenCode");
+    set("labelGeminiCli", "labelGeminiCli");
+    set("labelCline", "labelCline");
     set("labelAntigravity", "labelAntigravity");
     set("hotkeySectionTitle", "hotkeySectionTitle");
     set("hotkeyHint", "hotkeyHint");
@@ -690,6 +723,9 @@ function applyLang(lang) {
     if (elements.modelPickerTrigger) {
       elements.modelPickerTrigger.setAttribute("aria-label", t("modelPickerAria"));
     }
+    document.querySelectorAll(".interactive-card[data-expand-title]:not(#resetRow)").forEach((card) => {
+      card.dataset.collapseHint = t("collapseHint");
+    });
     applyPinnedState(elements.pinButton.classList.contains("active"));
     applyCompactState(isCompact);
     if (lastSnapshot) render(lastSnapshot);
@@ -703,11 +739,22 @@ async function refresh() {
   }
   isRefreshing = true;
   document.body.classList.add("refreshing");
+  elements.shell.setAttribute("aria-busy", "true");
+  elements.refreshButton.disabled = true;
+  elements.refreshButton.setAttribute("aria-label", t("refreshing"));
+  elements.appStatus.textContent = t("refreshing");
   try {
     render(await window.aiQuota.refresh());
+    elements.appStatus.textContent = t("refreshComplete");
+  } catch (error) {
+    console.error("Failed to refresh dashboard", error);
+    elements.appStatus.textContent = t("refreshFailed");
   } finally {
     isRefreshing = false;
     document.body.classList.remove("refreshing");
+    elements.shell.setAttribute("aria-busy", "false");
+    elements.refreshButton.disabled = false;
+    elements.refreshButton.setAttribute("aria-label", t("refreshTip"));
   }
 }
 
@@ -739,7 +786,7 @@ function applyCompactState(compact) {
   elements.compactButton.setAttribute("aria-pressed", String(isCompact));
   elements.compactIcon.setAttribute(
     "d",
-    isCompact ? "M9 3H3v6M15 3h6v6M21 15v6h-6M3 15v6h6" : "M7 8h10v8H7z"
+    isCompact ? "M9 3H3v6M15 3h6v6M21 15v6h-6M3 15v6h6" : "M6 7h12v10H6z"
   );
 }
 
@@ -804,7 +851,7 @@ function setupTokenRangeToggle() {
   });
 
   setTimeout(updateToggleSlider, 100);
-  window.addEventListener("resize", updateToggleSlider);
+  window.addEventListener("resize", scheduleToggleSliderUpdate);
 
   buttons.forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -849,6 +896,14 @@ function updateToggleSlider() {
   }
 }
 
+function scheduleToggleSliderUpdate() {
+  if (toggleSliderFrame) return;
+  toggleSliderFrame = requestAnimationFrame(() => {
+    toggleSliderFrame = null;
+    updateToggleSlider();
+  });
+}
+
 
 function setupModelSelect() {
   const picker = document.createElement("div");
@@ -865,7 +920,9 @@ function setupModelSelect() {
   label.className = "model-picker-label";
   arrow.className = "model-picker-arrow";
   menu.className = "model-picker-menu";
+  menu.id = "modelPickerMenu";
   menu.setAttribute("role", "listbox");
+  trigger.setAttribute("aria-controls", menu.id);
   trigger.append(label, arrow);
   picker.append(trigger, menu);
   elements.tokenCost.remove();
@@ -878,6 +935,15 @@ function setupModelSelect() {
   trigger.addEventListener("click", () => {
     picker.classList.contains("open") ? closeModelPicker() : openModelPicker();
   });
+  trigger.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const focus = event.key === "ArrowUp" || event.key === "End"
+      ? "last"
+      : event.key === "Home" ? "first" : "selected";
+    openModelPicker({ focus });
+  });
+  menu.addEventListener("keydown", handleModelPickerKeydown);
   document.addEventListener("pointerdown", (event) => {
     if (!picker.contains(event.target)) closeModelPicker();
   });
@@ -889,6 +955,13 @@ function syncModelSelect(modelUsage) {
   const sourceKeys = [...new Set(models.map((m) => m.source).filter(Boolean))];
   const allowed = new Set(["all", ...modelKeys, ...sourceKeys.map((source) => `source:${source}`)]);
   if (!allowed.has(selectedModel)) selectedModel = "all";
+  const nextSignature = JSON.stringify([
+    currentLocale(),
+    selectedModel,
+    models.map((item) => [item.source, item.sourceModel || item.model, item.model])
+  ]);
+  if (nextSignature === modelMenuSignature) return;
+  modelMenuSignature = nextSignature;
   updateModelPickerWidth(models);
   elements.modelPickerMenu.replaceChildren();
   const allOption = buildModelOption({ model: "all", label: t("allModels"), kind: "all" });
@@ -910,6 +983,7 @@ function syncModelSelect(modelUsage) {
     const expander = document.createElement("button");
     expander.type = "button";
     expander.className = "model-picker-expander";
+    expander.tabIndex = -1;
     expander.setAttribute("aria-label", t("modelExpanderAria", source.label));
     const modelList = document.createElement("div");
     modelList.className = "model-picker-models";
@@ -951,8 +1025,7 @@ function syncModelSelect(modelUsage) {
 
 function updateModelPickerWidth(models) {
   if (!elements.modelPickerTrigger || !elements.modelPicker) return;
-  const canvas = document.createElement("canvas");
-  const context = canvas.getContext("2d");
+  const context = modelMeasureCanvas.getContext("2d");
   if (!context) return;
   context.font = getComputedStyle(elements.modelPickerTrigger).font;
   const labels = [
@@ -974,11 +1047,13 @@ function buildModelOption(item) {
   option.setAttribute("role", "option");
   option.setAttribute("aria-selected", String(item.model === selectedModel));
   option.classList.toggle("selected", item.model === selectedModel);
+  option.tabIndex = -1;
   option.textContent = item.label || item.model;
   if (item.source) option.dataset.source = item.source;
   option.addEventListener("click", () => {
     selectedModel = item.model;
-    closeModelPicker();
+    closeModelPicker({ restoreFocus: true });
+    syncModelSelect(mergedModels);
     if (lastSnapshot) {
       const data = getTokenForModel(lastSnapshot, selectedModel);
       renderTokenStats(data, mergedModels, ++tokenRenderGeneration);
@@ -993,165 +1068,60 @@ function sourceLabel(stats) {
   const suffix = tokenRange === "cumulative" ? ` · ${t("cumulative")}` : "";
   if (stats.source === "codex") return "Codex" + suffix;
   if (stats.source === "claude") return "Claude Code" + suffix;
+  if (stats.source === "opencode") return "OpenCode" + suffix;
+  if (stats.source === "gemini") return "Gemini CLI" + suffix;
+  if (stats.source === "cline") return "Cline" + suffix;
   if (stats.source === "antigravity") return `Antigravity · ${t("estimated")}${suffix}`;
-  if (stats.source === "merged") return "Codex + Antigravity" + suffix;
+  if (stats.source === "merged") return t("allSources") + suffix;
   return (stats.source === "localSessions" || stats.source === "localModel" ? t("localSession") : t("apiData")) + suffix;
 }
 
-function openModelPicker() {
-  elements.modelPicker.classList.add("open");
-  elements.modelPickerTrigger.setAttribute("aria-expanded", "true");
+function visibleModelPickerItems() {
+  if (!elements.modelPickerMenu) return [];
+  return [...elements.modelPickerMenu.querySelectorAll(".model-picker-option, .model-picker-expander")]
+    .filter((item) => !item.closest("[hidden]"));
 }
 
-function closeModelPicker() {
+function focusModelPickerItem(target = "selected") {
+  const items = visibleModelPickerItems();
+  if (!items.length) return;
+  const selected = items.find((item) => item.classList.contains("selected"));
+  const item = target === "last" ? items.at(-1) : target === "first" ? items[0] : selected || items[0];
+  item.focus({ preventScroll: true });
+  item.scrollIntoView({ block: "nearest" });
+}
+
+function handleModelPickerKeydown(event) {
+  const items = visibleModelPickerItems();
+  const current = items.indexOf(document.activeElement);
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeModelPicker({ restoreFocus: true });
+    return;
+  }
+  if (event.key === "Tab") {
+    closeModelPicker();
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const key = event.key === "ArrowDown" ? "ArrowRight" : event.key === "ArrowUp" ? "ArrowLeft" : event.key;
+  const next = nextRovingIndex(current < 0 ? 0 : current, items.length, key);
+  items[next]?.focus({ preventScroll: true });
+  items[next]?.scrollIntoView({ block: "nearest" });
+}
+
+function openModelPicker({ focus = null } = {}) {
+  elements.modelPicker.classList.add("open");
+  elements.modelPickerTrigger.setAttribute("aria-expanded", "true");
+  if (focus) requestAnimationFrame(() => focusModelPickerItem(focus));
+}
+
+function closeModelPicker({ restoreFocus = false } = {}) {
   if (!elements.modelPicker) return;
   elements.modelPicker.classList.remove("open");
   elements.modelPickerTrigger.setAttribute("aria-expanded", "false");
-}
-
-function buildMergedModels(snapshot) {
-  const allModels = [];
-
-  function addModels(list, defaultSource, currentUsage) {
-    if (!Array.isArray(list)) return;
-    for (const m of list) {
-      const source = m.source || defaultSource;
-      allModels.push({
-        ...m,
-        source,
-        currentUsage,
-        sourceModel: `${source}:${m.model}`,
-        displayLabel: m.model
-      });
-    }
-  }
-
-  addModels(snapshot?.localTokenUsage?.modelUsage, "codex", true);
-  addModels(snapshot?.quota?.tokenStats?.modelUsage, "codex", true);
-  addModels(snapshot?.antigravityTokenUsage?.modelUsage, "antigravity", true);
-  addModels(snapshot?.localTokenUsage?.modelCatalog, "codex", false);
-  addModels(snapshot?.antigravityTokenUsage?.modelCatalog, "antigravity", false);
-
-  const seen = new Set();
-  return allModels.filter((m) => {
-    if (seen.has(m.sourceModel)) return false;
-    seen.add(m.sourceModel);
-    return true;
-  }).sort((a, b) => b.total - a.total || a.source.localeCompare(b.source) || a.model.localeCompare(b.model));
-}
-
-function getTokenForModel(snapshot, modelKey) {
-  const selection = parseModelSelection(modelKey);
-  if (selection.kind === "all") return mergeAllTokens(snapshot);
-  if (selection.kind === "source") return mergeSourceTokens(snapshot, selection.source);
-  if (selection.source === "antigravity") return getSourceModelData(snapshot?.antigravityTokenUsage, null, selection.model, "antigravity");
-  if (selection.source === "codex" || selection.source === "claude") {
-    return getSourceModelData(snapshot?.localTokenUsage, snapshot?.quota?.tokenStats, selection.model, selection.source);
-  }
-  return mergeAllTokens(snapshot);
-}
-
-function getSourceModelData(primary, fallback, model, source) {
-  const modelData = primary?.modelUsage?.find((m) => m.model === model && (!m.source || m.source === source))
-    || fallback?.modelUsage?.find((m) => m.model === model && (!m.source || m.source === source));
-  if (modelData) return { ...modelData, source, cacheHitRate: (modelData.cached === null || modelData.cached === undefined || modelData.input === 0) ? null : Math.round((modelData.cached / modelData.input) * 100) };
-  return null;
-}
-
-function mergeSourceTokens(snapshot, source) {
-  if (source === "antigravity") {
-    return mergeTokenItems(snapshot?.antigravityTokenUsage?.modelUsage, source);
-  }
-  const localModels = (snapshot?.localTokenUsage?.modelUsage || []).filter((item) => !item.source || item.source === source);
-  const merged = mergeTokenItems(localModels, source);
-  if (merged) return merged;
-  if (source === "codex" && snapshot?.quota?.tokenStats?.total != null) {
-    return { ...snapshot.quota.tokenStats, source: "codex" };
-  }
-  return null;
-}
-
-function mergeTokenItems(items, source) {
-  if (!Array.isArray(items) || !items.length) return null;
-  const sum = { input: 0, cached: 0, output: 0, reasoning: 0, total: 0 };
-  let hasData = false;
-  let cacheKnown = true;
-  for (const item of items) {
-    if (item?.total == null) continue;
-    hasData = true;
-    sum.input += item.input || 0;
-    sum.cached += item.cached || 0;
-    sum.output += item.output || 0;
-    sum.reasoning += item.reasoning || 0;
-    sum.total += item.total || 0;
-    if (item.cached == null) cacheKnown = false;
-  }
-  if (!hasData) return null;
-  return {
-    ...sum,
-    cached: cacheKnown ? sum.cached : null,
-    source,
-    cacheHitRate: cacheKnown && sum.input > 0 ? Math.round((sum.cached / sum.input) * 100) : null,
-    modelUsage: items
-  };
-}
-
-function mergeAllTokens(snapshot) {
-  let input = 0, cached = 0, output = 0, reasoning = 0, total = 0, hasData = false;
-  let hitRateInput = 0;
-  let hitRateCached = 0;
-
-  function add(src, isAntigravity = false) {
-    if (src?.total != null) {
-      hasData = true;
-      input += src.input || 0;
-      cached += src.cached || 0;
-      output += src.output || 0;
-      reasoning += src.reasoning || 0;
-      total += src.total || 0;
-
-      // Exclude Antigravity from global hit rate calculation since it cannot analyze cache hit rate
-      if (!isAntigravity && src.cached !== null && src.cached !== undefined) {
-        hitRateInput += src.input || 0;
-        hitRateCached += src.cached || 0;
-      }
-    }
-  }
-
-  const cs = snapshot?.quota?.tokenStats, cl = snapshot?.localTokenUsage;
-  if (cs?.total != null) add(cs); else if (cl?.total != null) add(cl);
-  add(snapshot?.antigravityTokenUsage, true);
-
-  if (!hasData) return null;
-  return {
-    source: "merged",
-    input,
-    cached,
-    output,
-    reasoning,
-    total,
-    cacheHitRate: hitRateInput > 0 ? Math.round((hitRateCached / hitRateInput) * 100) : null,
-    modelUsage: currentModelUsage(snapshot),
-    sessions: null
-  };
-}
-
-function currentModelUsage(snapshot) {
-  const models = [];
-  const seen = new Set();
-  const add = (items, defaultSource) => {
-    for (const item of items || []) {
-      const source = item.source || defaultSource;
-      const key = `${source}:${item.model}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      models.push({ ...item, source });
-    }
-  };
-  add(snapshot?.localTokenUsage?.modelUsage, "codex");
-  add(snapshot?.quota?.tokenStats?.modelUsage, "codex");
-  add(snapshot?.antigravityTokenUsage?.modelUsage, "antigravity");
-  return models;
+  if (restoreFocus) elements.modelPickerTrigger.focus({ preventScroll: true });
 }
 
 function localizedQuotaLabel(quotaWindow, fallbackLabel) {
@@ -1234,17 +1204,18 @@ function renderResetCredits(resetCredits, resetCard) {
 
 function openResetDialog() {
   clearCardFocus();
+  closeModelPicker();
   renderResetDialog();
-  elements.resetDialog.classList.add("open");
-  elements.resetDialog.setAttribute("aria-hidden", "false");
   elements.resetRow.setAttribute("aria-expanded", "true");
-  elements.resetDialogClose.focus();
+  modalController.open(elements.resetDialog, {
+    initialFocus: elements.resetDialogClose,
+    returnFocus: elements.resetRow,
+    onClose: () => elements.resetRow.setAttribute("aria-expanded", "false")
+  });
 }
 
 function closeResetDialog() {
-  elements.resetDialog.classList.remove("open");
-  elements.resetDialog.setAttribute("aria-hidden", "true");
-  elements.resetRow.setAttribute("aria-expanded", "false");
+  modalController.close(elements.resetDialog);
 }
 
 function renderResetDialog() {
@@ -1344,9 +1315,9 @@ async function renderTokenStats(stats, modelUsage, renderId) {
   elements.inputTokens.textContent = typeof stats?.input === "number" ? formatToken(input) : "--";
   elements.cachedTokens.textContent = typeof stats?.cached === "number" ? formatToken(cached) : "--";
   elements.outputTokens.textContent = typeof stats?.output === "number" ? formatToken(output) : "--";
-  document.getElementById("inputLabel").textContent = t("tokenInput");
-  document.getElementById("cachedLabel").textContent = t("tokenCache");
-  document.getElementById("outputLabel").textContent = t("tokenOutput");
+  elements.inputLabel.textContent = t("tokenInput");
+  elements.cachedLabel.textContent = t("tokenCache");
+  elements.outputLabel.textContent = t("tokenOutput");
   elements.tokenCost.textContent = hasTokenData
     ? sourceLabel(stats)
     : stats?.error
@@ -1582,16 +1553,21 @@ function renderHeatmapWithData(daily) {
   const tokenValues = days.map((item) => item.token).filter((v) => typeof v === "number");
   const maxToken = Math.max(1, ...tokenValues);
 
-  elements.hitHeatmap.innerHTML = "";
-  for (const day of days) {
+  const fragment = document.createDocumentFragment();
+  days.forEach((day, index) => {
     const cell = document.createElement("span");
     cell.style.opacity = day.token == null ? "0.1" : String(0.2 + (Math.min(day.token, maxToken) / maxToken) * 0.8);
     cell.dataset.date = day.date;
     cell.dataset.day = String(day.d.getDate());
     cell.dataset.token = day.token == null ? "" : formatToken(day.token);
     cell.dataset.label = `${day.d.getMonth() + 1}/${day.d.getDate()}`;
-    elements.hitHeatmap.append(cell);
-  }
+    const valueLabel = day.token == null ? t("noData") : `${formatToken(day.token)} Token`;
+    cell.setAttribute("role", "gridcell");
+    cell.setAttribute("aria-label", t("heatCellAria", day.date, valueLabel));
+    cell.tabIndex = index === days.length - 1 ? 0 : -1;
+    fragment.append(cell);
+  });
+  elements.hitHeatmap.replaceChildren(fragment);
 
   const lastToken = tokenValues.at(-1);
   elements.hitTrendLabel.textContent = lastToken == null ? t("noData") : formatToken(lastToken);
@@ -1601,24 +1577,41 @@ function renderHeatmapWithData(daily) {
 
 function setupHeatmapTooltip() {
   const heatmap = elements.hitHeatmap;
+  heatmap.addEventListener("pointerover", (event) => showHeatmapTooltip(event.target.closest("span")));
+  heatmap.addEventListener("pointerout", (event) => {
+    if (event.target.closest("span")) hideHeatmapTooltip();
+  });
+  heatmap.addEventListener("focusin", (event) => showHeatmapTooltip(event.target.closest("span")));
+  heatmap.addEventListener("focusout", (event) => {
+    if (!heatmap.contains(event.relatedTarget)) hideHeatmapTooltip();
+  });
+  heatmap.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+    const cells = [...heatmap.querySelectorAll("span")];
+    const current = cells.indexOf(document.activeElement);
+    const next = nextRovingIndex(current < 0 ? cells.length - 1 : current, cells.length, event.key, 6);
+    if (next < 0) return;
+    event.preventDefault();
+    cells.forEach((cell, index) => { cell.tabIndex = index === next ? 0 : -1; });
+    cells[next].focus({ preventScroll: true });
+  });
+}
+
+function showHeatmapTooltip(cell) {
+  if (!cell) return;
   const tip = elements.heatTooltip;
-  heatmap.addEventListener("mouseenter", (e) => {
-    const cell = e.target;
-    if (cell.tagName !== "SPAN") return;
-    const label = cell.dataset.label;
-    const token = cell.dataset.token;
-    tip.textContent = token ? `${label} · ${token}` : `${label} · ${t("noData")}`;
-    const wrapRect = heatmap.parentElement.getBoundingClientRect();
-    const cellRect = cell.getBoundingClientRect();
-    tip.style.left = `${cellRect.left - wrapRect.left + cellRect.width / 2}px`;
-    tip.style.bottom = `${wrapRect.bottom - cellRect.top + 6}px`;
-    tip.classList.add("visible");
-  }, true);
-  heatmap.addEventListener("mouseleave", (e) => {
-    if (e.target.tagName === "SPAN") {
-      tip.classList.remove("visible");
-    }
-  }, true);
+  const label = cell.dataset.label;
+  const token = cell.dataset.token;
+  tip.textContent = token ? `${label} · ${token}` : `${label} · ${t("noData")}`;
+  const wrapRect = elements.hitHeatmap.parentElement.getBoundingClientRect();
+  const cellRect = cell.getBoundingClientRect();
+  tip.style.left = `${cellRect.left - wrapRect.left + cellRect.width / 2}px`;
+  tip.style.bottom = `${wrapRect.bottom - cellRect.top + 6}px`;
+  tip.classList.add("visible");
+}
+
+function hideHeatmapTooltip() {
+  elements.heatTooltip.classList.remove("visible");
 }
 setupHeatmapTooltip();
 setupTrendTooltips();
@@ -1672,8 +1665,19 @@ function buildChartAxes(maxValue, xTicks, plot) {
 function setupTrendTooltips() {
   document.querySelectorAll(".chart-hit").forEach((hit) => {
     const key = hit.dataset.chart;
-    hit.addEventListener("pointermove", (event) => showChartTooltip(key, event));
+    hit.addEventListener("pointermove", (event) => scheduleChartTooltip(key, event));
     hit.addEventListener("pointerleave", () => hideChartTooltip(key));
+  });
+}
+
+function scheduleChartTooltip(key, event) {
+  pendingChartTooltip = { key, clientX: event.clientX, clientY: event.clientY };
+  if (chartTooltipFrame) return;
+  chartTooltipFrame = requestAnimationFrame(() => {
+    chartTooltipFrame = null;
+    const pending = pendingChartTooltip;
+    pendingChartTooltip = null;
+    if (pending) showChartTooltip(pending.key, pending);
   });
 }
 
@@ -1704,6 +1708,11 @@ function showChartTooltip(key, event) {
 }
 
 function hideChartTooltip(key) {
+  if (pendingChartTooltip?.key === key) pendingChartTooltip = null;
+  if (chartTooltipFrame) {
+    cancelAnimationFrame(chartTooltipFrame);
+    chartTooltipFrame = null;
+  }
   document.getElementById(`trend${key}Cursor`).classList.remove("visible");
   document.getElementById(`trend${key}Point`).classList.remove("visible");
   document.getElementById(`trend${key}Tooltip`).classList.remove("visible");
@@ -1730,9 +1739,36 @@ function setRingLayer(key) {
 }
 
 function activateWithKeyboard(event) {
+  if (event.target !== event.currentTarget) return;
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
+  if (isCompact && event.currentTarget === elements.quotaSide) {
+    refresh();
+    return;
+  }
   toggleCardFocus(event.currentTarget.closest(".interactive-card"));
+}
+
+function setupExpandableCards() {
+  document.querySelectorAll(".interactive-card[data-expand-title]:not(#resetRow)").forEach((card) => {
+    card.setAttribute("aria-expanded", "false");
+    card.addEventListener("click", (event) => {
+      if (focusedCard === card) {
+        event.stopPropagation();
+        toggleCardFocus(card);
+        return;
+      }
+      if (isCompact && card === elements.quotaSide) {
+        event.stopPropagation();
+        refresh();
+        return;
+      }
+      if (event.target.closest("button, input, select, a, [role=button], .reset-row, .detail-target, .chart-shell, .hit-heatmap")) return;
+      event.stopPropagation();
+      toggleCardFocus(card);
+    });
+    card.addEventListener("keydown", activateWithKeyboard);
+  });
 }
 
 function toggleCardFocus(card) {

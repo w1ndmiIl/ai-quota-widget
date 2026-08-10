@@ -14,12 +14,14 @@
             <span class="app-icon" aria-hidden="true"></span>
             <strong>AIbar</strong>
             <time id="updatedAt" class="updated">--:--:--</time>
+            <span id="appStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
           </div>
           <div class="window-actions">
             <span class="plan-pill">PLUS</span>
             <button id="refreshButton" class="icon-button" title="手动刷新" aria-label="手动刷新">
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M19 7v5h-5M5 17v-5h5M18 12a6 6 0 0 0-10.2-4.3L5 10M6 12a6 6 0 0 0 10.2 4.3L19 14" />
+                <path d="M20 11a8 8 0 1 0-2.34 5.66" />
+                <path d="M20 4v7h-7" />
               </svg>
             </button>
             <button id="pinButton" class="icon-button" title="置顶" aria-label="置顶">
@@ -28,14 +30,15 @@
               </svg>
             </button>
             <button id="settingsButton" class="icon-button" title="设置" aria-label="设置">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M12 1l2.4 5.2L20 7.5l-3.6 4.2.6 5.3-5-2.4-5 2.4.6-5.3L4 7.5l5.6-1.3L12 1z" />
+              <svg class="settings-sliders-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h8M16 7h4M4 17h4M12 17h8" />
+                <circle cx="14" cy="7" r="2" />
+                <circle cx="10" cy="17" r="2" />
               </svg>
             </button>
             <button id="compactButton" class="icon-button" title="切换紧凑视图" aria-label="缩小" aria-pressed="false">
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path id="compactIcon" d="M7 8h10v8H7z" />
+                <path id="compactIcon" d="M6 7h12v10H6z" />
               </svg>
             </button>
             <button id="closeButton" class="icon-button" title="关闭" aria-label="关闭">
@@ -203,8 +206,8 @@
                 <span id="hitTrendLabel">最近 30 天</span>
               </div>
               <div class="heatmap-wrap">
-                <div id="hitHeatmap" class="hit-heatmap"></div>
-                <div id="heatTooltip" class="heat-tip"></div>
+                <div id="hitHeatmap" class="hit-heatmap" role="grid"></div>
+                <div id="heatTooltip" class="heat-tip" role="status" aria-live="polite"></div>
               </div>
               <div class="heat-footer">
                 <span id="heatDateStart">--</span>
@@ -220,7 +223,7 @@
         </section>
       </section>
     </main>
-    <section id="resetDialog" class="reset-dialog" aria-hidden="true">
+    <section id="resetDialog" class="reset-dialog" aria-hidden="true" inert>
       <div class="reset-dialog-backdrop"></div>
       <div class="reset-dialog-card" role="dialog" aria-modal="true" aria-labelledby="resetDialogTitle">
         <header class="reset-dialog-head">
@@ -232,10 +235,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8l8 8M16 8l-8 8" /></svg>
           </button>
         </header>
-        <div id="resetDialogList" class="reset-dialog-list"></div>
+        <div id="resetDialogList" class="reset-dialog-list" tabindex="0"></div>
       </div>
     </section>
-    <section id="settingsPanel" class="settings-panel" aria-hidden="true">
+    <section id="settingsPanel" class="settings-panel" aria-hidden="true" inert>
       <div class="settings-backdrop"></div>
       <div id="settingsCard" class="settings-card" role="dialog" aria-modal="true" aria-label="设置">
         <header class="settings-head">
@@ -270,6 +273,18 @@
             <label class="setting-checkbox-row">
               <input type="checkbox" id="cfgClaudeCode" />
               <span id="labelClaudeCode">Claude Code 本地日志</span>
+            </label>
+            <label class="setting-checkbox-row">
+              <input type="checkbox" id="cfgOpenCode" />
+              <span id="labelOpenCode">OpenCode 本地会话</span>
+            </label>
+            <label class="setting-checkbox-row">
+              <input type="checkbox" id="cfgGeminiCli" />
+              <span id="labelGeminiCli">Gemini CLI 本地会话</span>
+            </label>
+            <label class="setting-checkbox-row">
+              <input type="checkbox" id="cfgCline" />
+              <span id="labelCline">Cline 本地日志</span>
             </label>
             <label class="setting-checkbox-row">
               <input type="checkbox" id="cfgAntigravity" />
@@ -313,12 +328,14 @@
           </div>
         </div>
         <footer class="settings-foot">
-          <span id="settingsStatus" class="settings-status"></span>
+          <span id="settingsStatus" class="settings-status" role="status" aria-live="polite" aria-atomic="true"></span>
           <button id="settingsSave" class="settings-save-btn">保存</button>
         </footer>
       </div>
     </section>
     <script src="./token-pricing.js"></script>
+    <script src="./model-usage.js"></script>
+    <script src="./ui-interactions.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

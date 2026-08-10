@@ -157,6 +157,15 @@ button {
   font: inherit;
 }
 
+.sr-only {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 body {
   margin: 0;
   width: 100vw;
@@ -274,13 +283,14 @@ body {
 }
 
 .icon-button svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 1.8;
+  stroke-width: 1.9;
+  vector-effect: non-scaling-stroke;
 }
 
 .icon-button:hover,
@@ -291,6 +301,11 @@ body {
 
 .icon-button:active {
   transform: scale(0.94);
+}
+
+.icon-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 #pinButton.active {
@@ -543,7 +558,7 @@ body {
 .interactive-card {
   position: relative;
   isolation: isolate;
-  cursor: default;
+  cursor: zoom-in;
   transition: background 240ms ease, box-shadow 280ms var(--motion-spring), transform 280ms var(--motion-spring), opacity 180ms ease;
 }
 
@@ -585,7 +600,14 @@ body {
 
 .detail-target:focus-visible,
 .interactive-card:focus-visible,
-.icon-button:focus-visible {
+.icon-button:focus-visible,
+.model-picker-trigger:focus-visible,
+.model-picker-option:focus-visible,
+.model-picker-expander:focus-visible,
+.range-btn:focus-visible,
+.settings-save-btn:focus-visible,
+.hotkey-text-button:focus-visible,
+.hotkey-clear-button:focus-visible {
   outline: 2px solid rgba(88, 200, 104, 0.82);
   outline-offset: 2px;
 }
@@ -752,6 +774,7 @@ body {
   box-shadow: 0 12px 28px rgba(37, 63, 47, 0.18);
   scrollbar-color: rgba(91, 111, 99, 0.42) transparent;
   scrollbar-width: thin;
+  overscroll-behavior: contain;
 }
 
 .model-picker-menu::-webkit-scrollbar {
@@ -771,8 +794,11 @@ body {
 }
 
 .quota-side .reset-row {
-  border-color: rgba(103, 87, 231, 0.14);
   cursor: pointer;
+}
+
+.quota-side .reset-row:hover {
+  border-color: rgba(103, 87, 231, 0.18);
 }
 
 .quota-side .reset-row .reset-sub {
@@ -1351,6 +1377,15 @@ body {
   z-index: 2;
 }
 
+.hit-heatmap span:focus-visible {
+  z-index: 3;
+  outline: 2px solid rgba(88, 200, 104, 0.86);
+  outline-offset: 2px;
+  transform: scale(1.2);
+  box-shadow: 0 4px 12px rgba(237, 169, 27, 0.35);
+  filter: brightness(1.08);
+}
+
 .heatmap-wrap {
   position: relative;
   min-height: 0;
@@ -1456,7 +1491,38 @@ body.refreshing #refreshButton svg {
   bottom: 12px;
   color: var(--muted);
   font-size: 11px;
-  content: "再次点击或按 Esc 返回";
+  content: attr(data-collapse-hint);
+}
+
+.token-card.is-focused,
+.heat-card.is-focused {
+  display: grid;
+  align-content: center;
+  padding: 32px 44px 38px;
+}
+
+.total-token.is-focused .token-card-body {
+  gap: 18px;
+}
+
+.total-token.is-focused #totalTokens,
+.token-card.is-focused #cacheHitRate {
+  font-size: clamp(40px, 8vw, 72px);
+}
+
+.heat-card.is-focused .hit-heatmap {
+  grid-template-columns: repeat(6, minmax(42px, 1fr));
+  gap: 8px;
+}
+
+:root[data-theme="dark"] .panel.focus-mode::before {
+  background: rgba(18, 24, 31, 0.78);
+}
+
+:root[data-theme="dark"] .interactive-card.is-focused {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(36, 46, 57, 0.98);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.38);
 }
 
 .quota-side.is-focused {
@@ -1782,7 +1848,7 @@ body.compact.refreshing .metric-side strong {
 
 .settings-card {
   position: relative;
-  width: 400px;
+  width: min(400px, calc(100vw - 24px));
   padding: 20px 22px 18px;
   border: 1px solid rgba(255, 255, 255, 0.8);
   border-radius: 18px;
@@ -1793,6 +1859,7 @@ body.compact.refreshing .metric-side strong {
   gap: 16px;
   max-height: calc(100vh - 24px);
   overflow: hidden;
+  animation: reset-dialog-in 180ms var(--motion-spring);
 }
 
 .settings-head {
@@ -2020,11 +2087,20 @@ body.compact.refreshing .metric-side strong {
   gap: 10px;
   cursor: pointer;
   user-select: none;
+  margin: 0 -6px;
+  padding: 5px 6px;
+  border-radius: 8px;
+  transition: background 140ms ease;
+}
+
+.setting-checkbox-row:hover,
+.setting-checkbox-row:focus-within {
+  background: rgba(88, 200, 104, 0.1);
 }
 
 .setting-checkbox-row input[type="checkbox"] {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
   cursor: pointer;
   accent-color: #36b86a;
 }
@@ -2047,6 +2123,11 @@ body.compact.refreshing .metric-side strong {
 }
 :root[data-theme="dark"] .setting-checkbox-row input[type="checkbox"] {
   accent-color: #2a9c57;
+}
+
+:root[data-theme="dark"] .setting-checkbox-row:hover,
+:root[data-theme="dark"] .setting-checkbox-row:focus-within {
+  background: rgba(88, 200, 104, 0.12);
 }
 
 :root[data-theme="dark"] .hotkey-section {

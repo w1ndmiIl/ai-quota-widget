@@ -1,12 +1,15 @@
 "use strict";
 
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, globalShortcut } = require("electron");
-const { Worker } = require("node:worker_threads");
 const path = require("node:path");
 const fs = require("node:fs");
+const { loadAppConfig, normalizeAppConfig, persistAppConfig, sourceConfigChanged } = require("./app-config-store");
 const { CodexService } = require("./codex-service");
+const { DashboardSnapshotStore } = require("./dashboard-snapshot-store");
 const { readResetCredits } = require("./reset-credits-service");
-const { DEFAULT_HOTKEYS, normalizeHotkeys, findDuplicateHotkey } = require("./hotkey-config");
+const { normalizeHotkeys, findDuplicateHotkey } = require("./hotkey-config");
+const { UsageCoordinator } = require("./usage-coordinator");
+const { UsageWorkerClient } = require("./usage-worker-client");
 
 // This lightweight dashboard has no WebGL/video workload. Software compositing avoids
 // keeping a large GPU helper process resident while it waits in the tray.
@@ -41,54 +44,11 @@ process.env.AI_QUOTA_USER_DATA_PATH = userDataPath;
 const NORMAL_SIZE = { width: 760, height: 540 };
 const COMPACT_SIZE = { width: 336, height: 72 };
 
-let appConfig = {
-  enableCodex: true,
-  enableClaudeCode: true,
-  enableAntigravity: true,
-  hotkeys: { ...DEFAULT_HOTKEYS }
-};
-
 const configPath = path.join(userDataPath, "config.json");
-try {
-  if (fs.existsSync(configPath)) {
-    appConfig = { ...appConfig, ...JSON.parse(fs.readFileSync(configPath, "utf8")) };
-  }
-} catch (e) {
-  console.error("Failed to load app config", e);
-}
-appConfig.hotkeys = normalizeHotkeys(appConfig.hotkeys);
-
-const dashboardCachePath = path.join(userDataPath, "dashboard_snapshot.json");
-let cachedDashboardSnapshot = loadDashboardSnapshot();
-let dashboardSavePending = Promise.resolve();
-
-function loadDashboardSnapshot() {
-  try {
-    return JSON.parse(fs.readFileSync(dashboardCachePath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function sourceConfigMatches(snapshot) {
-  return ["enableCodex", "enableClaudeCode", "enableAntigravity"]
-    .every((key) => snapshot?.config?.[key] === appConfig[key]);
-}
-
-function getCachedDashboardSnapshot() {
-  if (!cachedDashboardSnapshot || !sourceConfigMatches(cachedDashboardSnapshot)) return null;
-  return { ...cachedDashboardSnapshot, config: appConfig, stale: true };
-}
-
-function saveDashboardSnapshot(snapshot) {
-  if (!snapshot || (!snapshot.quota && !snapshot.localTokenUsage && !snapshot.antigravityTokenUsage)) return;
-  cachedDashboardSnapshot = { ...snapshot, config: appConfig, error: null, errors: [] };
-  const serialized = JSON.stringify(cachedDashboardSnapshot);
-  dashboardSavePending = dashboardSavePending
-    .then(() => fs.promises.mkdir(userDataPath, { recursive: true }))
-    .then(() => fs.promises.writeFile(dashboardCachePath, serialized, "utf8"))
-    .catch(() => {});
-}
+let appConfig = loadAppConfig(configPath);
+const snapshotStore = new DashboardSnapshotStore({ userDataPath, getConfig: () => appConfig });
+const usageWorkerClient = new UsageWorkerClient(path.join(__dirname, "usage-worker.js"));
+const usageCoordinator = new UsageCoordinator({ workerClient: usageWorkerClient, getConfig: () => appConfig });
 
 const codex = new CodexService();
 let mainWindow = null;
@@ -127,7 +87,7 @@ function scheduleBackgroundIdle() {
     backgroundIdleTimer = null;
     if (mainWindow?.isVisible()) return;
     codex.dispose();
-    stopUsageWorker();
+    usageCoordinator.stop();
   }, BACKGROUND_IDLE_MS);
   backgroundIdleTimer.unref?.();
 }
@@ -237,175 +197,11 @@ function createTray() {
 }
 
 
-let cachedLocalUsage = null;
-let cachedAntigravityUsage = null;
-let lastLocalUsageTime = 0;
-let lastAntigravityUsageTime = 0;
-const CACHE_TTL = 15000; // 15 seconds cache
 let cachedResetCredits = null;
 let lastResetCreditsTime = 0;
 let resetCreditsPending = null;
 const RESET_CREDITS_CACHE_TTL = 5 * 60_000;
-const HISTORY_CACHE_TTL = 60_000;
-const CUMULATIVE_CACHE_TTL = 5 * 60_000;
-const historyCache = new Map();
-const cumulativeCache = new Map();
-const historyPending = new Map();
-const cumulativePending = new Map();
 let snapshotInFlight = null;
-let usageWorker = null;
-let usageWorkerNextId = 1;
-const usageWorkerPending = new Map();
-let usageWorkerIdleTimer = null;
-const USAGE_WORKER_IDLE_MS = 30_000;
-
-function clearUsageCaches() {
-  cachedLocalUsage = null;
-  cachedAntigravityUsage = null;
-  lastLocalUsageTime = 0;
-  lastAntigravityUsageTime = 0;
-  historyCache.clear();
-  cumulativeCache.clear();
-}
-
-function getUsageWorker() {
-  if (usageWorkerIdleTimer) {
-    clearTimeout(usageWorkerIdleTimer);
-    usageWorkerIdleTimer = null;
-  }
-  if (usageWorker) return usageWorker;
-
-  const worker = new Worker(path.join(__dirname, "usage-worker.js"));
-  worker.unref();
-  worker.on("message", ({ id, result, error }) => {
-    const pending = usageWorkerPending.get(id);
-    if (!pending) return;
-    usageWorkerPending.delete(id);
-    if (error) pending.reject(new Error(error));
-    else pending.resolve(result);
-    scheduleUsageWorkerIdle();
-  });
-  worker.on("error", (error) => {
-    if (usageWorker === worker) resetUsageWorker(error);
-  });
-  worker.on("exit", (code) => {
-    if (usageWorker === worker) {
-      resetUsageWorker(new Error(`Usage worker exited with code ${code}`));
-    }
-  });
-  usageWorker = worker;
-  return worker;
-}
-
-function scheduleUsageWorkerIdle() {
-  if (!usageWorker || usageWorkerPending.size || usageWorkerIdleTimer) return;
-  const worker = usageWorker;
-  usageWorkerIdleTimer = setTimeout(() => {
-    usageWorkerIdleTimer = null;
-    if (usageWorker !== worker || usageWorkerPending.size) return;
-    usageWorker = null;
-    worker.terminate();
-  }, USAGE_WORKER_IDLE_MS);
-  usageWorkerIdleTimer.unref?.();
-}
-
-function stopUsageWorker(force = false) {
-  if (usageWorkerIdleTimer) {
-    clearTimeout(usageWorkerIdleTimer);
-    usageWorkerIdleTimer = null;
-  }
-  if (!usageWorker || (usageWorkerPending.size && !force)) return;
-  const worker = usageWorker;
-  usageWorker = null;
-  worker.terminate();
-}
-
-function resetUsageWorker(error) {
-  usageWorker = null;
-  for (const pending of usageWorkerPending.values()) {
-    pending.reject(error);
-  }
-  usageWorkerPending.clear();
-}
-
-function readUsageInWorker(operation, payload) {
-  const worker = getUsageWorker();
-  const id = usageWorkerNextId++;
-  return new Promise((resolve, reject) => {
-    usageWorkerPending.set(id, { resolve, reject });
-    worker.postMessage({ id, operation, payload });
-  });
-}
-
-async function readCachedLocalUsage(now) {
-  if (cachedLocalUsage && now - lastLocalUsageTime < CACHE_TTL) {
-    return cachedLocalUsage;
-  }
-  const sources = [
-    appConfig.enableCodex ? "codex" : null,
-    appConfig.enableClaudeCode ? "claude" : null
-  ].filter(Boolean);
-  cachedLocalUsage = await readUsageInWorker("codexUsage", { sources });
-  lastLocalUsageTime = Date.now();
-  return cachedLocalUsage;
-}
-
-async function readCachedAntigravityUsage(now) {
-  if (cachedAntigravityUsage && now - lastAntigravityUsageTime < CACHE_TTL) {
-    return cachedAntigravityUsage;
-  }
-  cachedAntigravityUsage = await readUsageInWorker("antigravityUsage");
-  lastAntigravityUsageTime = Date.now();
-  return cachedAntigravityUsage;
-}
-
-async function readCachedHistory(source, model, sourceFilter = null) {
-  const key = `${source}:${sourceFilter || "all"}:${model}`;
-  const cached = historyCache.get(key);
-  const now = Date.now();
-  if (cached && now - cached.at < HISTORY_CACHE_TTL) {
-    return cached.value;
-  }
-
-  const pending = historyPending.get(key);
-  if (pending) return pending;
-
-  const operation = source === "antigravity" ? "antigravityHistory" : "codexHistory";
-  const promise = readUsageInWorker(operation, { model, source: sourceFilter, days: 45 })
-    .then((value) => {
-      historyCache.set(key, { at: Date.now(), value });
-      return value;
-    })
-    .finally(() => historyPending.delete(key));
-  historyPending.set(key, promise);
-  return promise;
-}
-
-async function readCachedCumulativeTokens(selection) {
-  const cacheKey = selection || "all";
-  const cached = cumulativeCache.get(cacheKey);
-  const now = Date.now();
-  if (cached && now - cached.at < CUMULATIVE_CACHE_TTL) {
-    return cached.value;
-  }
-
-  const pending = cumulativePending.get(cacheKey);
-  if (pending) return pending;
-
-  const promise = readUsageInWorker("cumulative", {
-    selection: cacheKey,
-    enableClaudeCode: appConfig.enableClaudeCode,
-    enableCodex: appConfig.enableCodex,
-    enableAntigravity: appConfig.enableAntigravity
-  })
-    .then((value) => {
-      cumulativeCache.set(cacheKey, { at: Date.now(), value });
-      return value;
-    })
-    .finally(() => cumulativePending.delete(cacheKey));
-  cumulativePending.set(cacheKey, promise);
-  return promise;
-}
 
 async function readCachedResetCredits() {
   if (cachedResetCredits && Date.now() - lastResetCreditsTime < RESET_CREDITS_CACHE_TTL) {
@@ -416,10 +212,10 @@ async function readCachedResetCredits() {
     .then((credits) => {
       cachedResetCredits = credits;
       lastResetCreditsTime = Date.now();
-      const cached = getCachedDashboardSnapshot();
+      const cached = snapshotStore.getCached();
       if (cached) {
         const snapshot = { ...cached, resetCredits: credits, stale: false, updatedAt: Date.now() };
-        saveDashboardSnapshot(snapshot);
+        snapshotStore.save(snapshot);
         mainWindow?.webContents.send("quota:updated", snapshot);
       }
       return credits;
@@ -440,8 +236,8 @@ async function readSnapshot() {
 
   const now = Date.now();
   const tokenUsageResults = Promise.allSettled([
-    appConfig.enableAntigravity ? readCachedAntigravityUsage(now) : Promise.resolve(null),
-    appConfig.enableCodex || appConfig.enableClaudeCode ? readCachedLocalUsage(now) : Promise.resolve(null)
+    appConfig.enableAntigravity ? usageCoordinator.readAntigravityUsage(now) : Promise.resolve(null),
+    usageCoordinator.enabledLocalSources().length ? usageCoordinator.readLocalUsage(now) : Promise.resolve(null)
   ]);
 
   if (appConfig.enableCodex) {
@@ -498,7 +294,7 @@ async function readSnapshot() {
     errors,
     updatedAt: Date.now()
   };
-  saveDashboardSnapshot(snapshot);
+  snapshotStore.save(snapshot);
   return snapshot;
 }
 
@@ -536,7 +332,7 @@ function resizeWindow(compact) {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle("quota:cached", getCachedDashboardSnapshot);
+  ipcMain.handle("quota:cached", () => snapshotStore.getCached());
   // The invoking renderer already receives the returned snapshot; broadcasting
   // it as well would render every refresh twice.
   ipcMain.handle("quota:refresh", readSnapshotOnce);
@@ -550,8 +346,11 @@ app.whenReady().then(() => {
     try {
       if (sourceFilter === "codex" && !appConfig.enableCodex) return { daily: {}, hourly: [] };
       if (sourceFilter === "claude" && !appConfig.enableClaudeCode) return { daily: {}, hourly: [] };
-      if (!sourceFilter && !appConfig.enableCodex && !appConfig.enableClaudeCode) return { daily: {}, hourly: [] };
-      return await readCachedHistory("codex", model, sourceFilter);
+      if (sourceFilter === "opencode" && !appConfig.enableOpenCode) return { daily: {}, hourly: [] };
+      if (sourceFilter === "gemini" && !appConfig.enableGeminiCli) return { daily: {}, hourly: [] };
+      if (sourceFilter === "cline" && !appConfig.enableCline) return { daily: {}, hourly: [] };
+      if (!sourceFilter && !usageCoordinator.enabledLocalSources().length) return { daily: {}, hourly: [] };
+      return await usageCoordinator.readHistory("local", model, sourceFilter);
     } catch {
       return { daily: {}, hourly: [] };
     }
@@ -559,14 +358,14 @@ app.whenReady().then(() => {
   ipcMain.handle("antigravity:history", async (_event, model) => {
     try {
       if (!appConfig.enableAntigravity) return { daily: {}, hourly: [] };
-      return await readCachedHistory("antigravity", model);
+      return await usageCoordinator.readHistory("antigravity", model);
     } catch {
       return { daily: {}, hourly: [] };
     }
   });
   ipcMain.handle("tokens:cumulative", async (_event, selection) => {
     try {
-      return await readCachedCumulativeTokens(selection);
+      return await usageCoordinator.readCumulative(selection);
     } catch {
       return null;
     }
@@ -574,26 +373,24 @@ app.whenReady().then(() => {
   ipcMain.handle("settings:read", () => appConfig);
   ipcMain.handle("settings:update", (_event, newConfig) => {
     const previousConfig = appConfig;
-    const nextConfig = { ...appConfig, ...newConfig, hotkeys: normalizeHotkeys(newConfig?.hotkeys ?? appConfig.hotkeys) };
+    const nextConfig = normalizeAppConfig({ ...appConfig, ...newConfig });
     const shortcutResult = registerGlobalShortcuts(nextConfig.hotkeys);
     if (!shortcutResult.ok) return shortcutResult;
     const persistedConfig = { ...nextConfig, hotkeys: shortcutResult.hotkeys };
     try {
-      fs.mkdirSync(userDataPath, { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify(persistedConfig, null, 2), "utf8");
+      persistAppConfig(configPath, persistedConfig);
     } catch (error) {
       registerGlobalShortcuts(previousConfig.hotkeys);
       return { ok: false, code: "writeFailed", error: error?.message || String(error) };
     }
 
-    const sourcesChanged = ["enableCodex", "enableClaudeCode", "enableAntigravity"]
-      .some((key) => previousConfig[key] !== persistedConfig[key]);
+    const sourcesChanged = sourceConfigChanged(previousConfig, persistedConfig);
     appConfig = persistedConfig;
     if (!appConfig.enableCodex) {
       codex.dispose();
     }
     if (sourcesChanged) {
-      clearUsageCaches();
+      usageCoordinator.clearCaches();
       refreshAndPush().catch(() => {});
     }
     return { ok: true, hotkeys: appConfig.hotkeys };
@@ -613,7 +410,7 @@ app.whenReady().then(() => {
   });
 
   codex.on("quota-updated", (quota) => {
-    const cached = getCachedDashboardSnapshot() || {};
+    const cached = snapshotStore.getCached() || {};
     mainWindow?.webContents.send("quota:updated", {
       ...cached,
       quota,
@@ -625,8 +422,8 @@ app.whenReady().then(() => {
     });
   });
 
-  // Pre-warm codex process before window is ready to reduce first-refresh latency
-  codex.ensureStarted().catch(() => {});
+  // Pre-warm only when the source is enabled; disabled sources must stay cold.
+  if (appConfig.enableCodex) codex.ensureStarted().catch(() => {});
 
   createWindow();
   createTray();
@@ -638,7 +435,7 @@ app.on("before-quit", () => {
   globalShortcut.unregisterAll();
   codex.dispose();
   cancelBackgroundIdle();
-  stopUsageWorker(true);
+  usageCoordinator.stop(true);
 });
 
 app.on("window-all-closed", () => {
