@@ -51,7 +51,9 @@ test("reads and deduplicates Cline token events across migrated task roots", (t)
   assert.equal(usage.output, 30);
   assert.equal(usage.total, 160);
   assert.equal(usage.sessions, 1);
-  assert.deepEqual(usage.modelUsage, [{
+  assert.deepEqual(usage.modelUsage.map(({ model, source, input, cached, cacheWrite, output, reasoning, total }) => ({
+    model, source, input, cached, cacheWrite, output, reasoning, total
+  })), [{
     model: "anthropic/claude-sonnet-4-6",
     source: "cline",
     input: 130,
@@ -61,9 +63,15 @@ test("reads and deduplicates Cline token events across migrated task roots", (t)
     reasoning: 0,
     total: 160
   }]);
+  assert.equal(usage.modelUsage[0].pricingSettled, true);
+  assert.ok(usage.modelUsage[0].estimatedUsd > 0);
   const history = readClineTokenHistory({ now: now + 60_000, roots, model: "anthropic/claude-sonnet-4-6" });
   assert.equal(Object.values(history.daily)[0].total, 160);
   assert.equal(history.hourly.reduce((sum, item) => sum + item.total, 0), 160);
+  for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+  const retained = readClineTokenUsage({ now: now + 60_000, roots });
+  assert.equal(retained.total, 160);
+  assert.equal(retained.modelUsage[0].model, "anthropic/claude-sonnet-4-6");
 });
 
 test("reads Gemini CLI session token summaries without loading transcript content", (t) => {
@@ -101,7 +109,9 @@ test("reads Gemini CLI session token summaries without loading transcript conten
   assert.equal(usage.total, 145);
   assert.equal(usage.cacheHitRate, 40);
   assert.equal(usage.sessions, 1);
-  assert.deepEqual(usage.modelUsage, [{
+  assert.deepEqual(usage.modelUsage.map(({ model, source, input, cached, cacheWrite, output, reasoning, total }) => ({
+    model, source, input, cached, cacheWrite, output, reasoning, total
+  })), [{
     model: "gemini-2.5-pro",
     source: "gemini",
     input: 100,
@@ -111,8 +121,15 @@ test("reads Gemini CLI session token summaries without loading transcript conten
     reasoning: 10,
     total: 145
   }]);
+  assert.equal(usage.modelUsage[0].pricingSettled, true);
+  assert.ok(usage.modelUsage[0].estimatedUsd > 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(dir, "history-cache.json"), "utf8"), /private transcript text/);
   const history = readGeminiTokenHistory({ now: now + 1_000, roots: [dir], model: "gemini-2.5-pro" });
   assert.equal(Object.values(history.daily)[0].total, 145);
+  fs.rmSync(path.join(dir, "project-hash"), { recursive: true, force: true });
+  const retained = readGeminiTokenUsage({ now: now + 1_000, roots: [dir] });
+  assert.equal(retained.total, 145);
+  assert.equal(retained.modelUsage[0].model, "gemini-2.5-pro");
 });
 
 test("parses OpenCode session lists and exact exported assistant usage", () => {
@@ -156,10 +173,11 @@ test("reads OpenCode usage through its read-only session export commands", (t) =
   });
   const now = Date.parse("2026-08-10T12:00:00Z");
   const calls = [];
+  let sessionExists = true;
   const runner = (_binary, args) => {
     calls.push(args);
     if (args[0] === "session") {
-      return { ok: true, stdout: JSON.stringify([{ id: "ses_1", updated: now }]) };
+      return { ok: true, stdout: JSON.stringify(sessionExists ? [{ id: "ses_1", updated: now }] : []) };
     }
     return {
       ok: true,
@@ -181,6 +199,11 @@ test("reads OpenCode usage through its read-only session export commands", (t) =
   ]);
   const cache = fs.readFileSync(path.join(dir, "opencode_usage_cache.json"), "utf8");
   assert.doesNotMatch(cache, /private transcript text/);
+  sessionExists = false;
+  const retained = readOpenCodeTokenUsage({ now: now + 1_000, binary: "opencode-test", runner });
+  assert.equal(retained.total, 65);
+  assert.equal(retained.sessions, 1);
+  assert.deepEqual(calls.at(-1), ["session", "list", "--format", "json"]);
 });
 
 test("parses official OpenCode stats output for fast dashboard totals", () => {
@@ -208,7 +231,9 @@ test("parses official OpenCode stats output for fast dashboard totals", () => {
   assert.equal(usage.sessions, 2);
   assert.equal(usage.input, 1_600);
   assert.equal(usage.total, 1_800);
-  assert.deepEqual(usage.modelUsage, [{
+  assert.deepEqual(usage.modelUsage.map(({ model, source, input, cached, cacheWrite, output, reasoning, total }) => ({
+    model, source, input, cached, cacheWrite, output, reasoning, total
+  })), [{
     model: "anthropic/claude-sonnet-4-6",
     source: "opencode",
     input: 1_600,

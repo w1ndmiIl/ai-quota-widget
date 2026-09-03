@@ -13,13 +13,17 @@ const {
 
 const exportCache = new Map();
 let discoveredBinary;
-let exportCacheLoaded = false;
+let exportCacheLoadedPath;
 
 function readOpenCodeTokenUsage(options = {}) {
   const now = options.now || Date.now();
-  const days = options.days || 1;
+  const days = Object.hasOwn(options, "days") && options.days == null ? null : options.days || 1;
+  const catalogDays = Object.hasOwn(options, "catalogDays") ? options.catalogDays : days;
+  const since = days == null || catalogDays == null
+    ? 0
+    : now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
   const events = readOpenCodeEvents({
-    since: now - Math.max(days, options.catalogDays || days) * 24 * 60 * 60 * 1000,
+    since,
     runner: options.runner,
     binary: options.binary
   });
@@ -27,6 +31,7 @@ function readOpenCodeTokenUsage(options = {}) {
     ...options,
     now,
     days,
+    catalogDays,
     source: "opencode",
     emptyError: "No local OpenCode session usage found"
   });
@@ -57,13 +62,12 @@ function readOpenCodeTokenHistory(options = {}) {
 function readOpenCodeEvents({ since = 0, runner = runOpenCode, binary } = {}) {
   loadExportCache();
   const executable = binary || findOpenCodeBinary();
-  if (!executable && runner === runOpenCode) return [];
-  const listResult = runner(executable, ["session", "list", "--format", "json"]);
-  if (!listResult?.ok) return [];
-  const sessions = parseSessionList(listResult.stdout)
+  const listResult = !executable && runner === runOpenCode
+    ? { ok: false, stdout: "" }
+    : runner(executable, ["session", "list", "--format", "json"]);
+  const sessions = (listResult?.ok ? parseSessionList(listResult.stdout) : [])
     .filter((session) => numericTimestamp(session.updated, 0) >= since)
     .sort((a, b) => numericTimestamp(a.updated, 0) - numericTimestamp(b.updated, 0));
-  const events = [];
   let cacheChanged = false;
   for (const session of sessions) {
     const updated = numericTimestamp(session.updated, 0);
@@ -76,16 +80,37 @@ function readOpenCodeEvents({ since = 0, runner = runOpenCode, binary } = {}) {
       exportCache.set(cacheKey, cached);
       cacheChanged = true;
     }
-    events.push(...cached.events.filter((event) => event.t >= since));
   }
   if (cacheChanged) saveExportCache();
+  const events = [];
+  const seen = new Set();
+  for (const cached of exportCache.values()) {
+    for (const event of cached.events || []) {
+      if (event.t < since) continue;
+      const signature = [
+        event.session || "",
+        event.t || 0,
+        event.model || "unknown",
+        event.input || 0,
+        event.cached || 0,
+        event.cacheWrite || 0,
+        event.output || 0,
+        event.reasoning || 0,
+        event.total || 0
+      ].join("\u0000");
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      events.push(event);
+    }
+  }
   return events;
 }
 
 function loadExportCache() {
-  if (exportCacheLoaded) return;
-  exportCacheLoaded = true;
   const cachePath = openCodeCachePath();
+  if (exportCacheLoadedPath === cachePath) return;
+  exportCache.clear();
+  exportCacheLoadedPath = cachePath;
   if (!cachePath) return;
   try {
     const value = JSON.parse(fs.readFileSync(cachePath, "utf8"));

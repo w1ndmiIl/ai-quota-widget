@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { scanFilesIncrementally } = require("./incremental-scan-engine");
+const { addSettledUsageCost } = require("./usage-cost-settlement");
 
 // Antigravity stores sessions under ~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl
 // These files contain conversation steps but NO token counts — we estimate from text content.
@@ -13,10 +14,12 @@ const CHARS_PER_TOKEN = 2.8; // mixed-language estimate including code and Chine
 
 function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, root = defaultSessionsRoot() } = {}) {
   const since = now - days * 24 * 60 * 60 * 1000;
-  const catalogSince = now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
+  const catalogSince = catalogDays == null
+    ? 0
+    : now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
   const catalogEvents = readRecentEvents({ since: catalogSince, root });
   const events = catalogEvents.filter((event) => event.t >= since);
-  const modelCatalog = catalogDays > days ? summarizeModelUsage(catalogEvents) : summarizeModelUsage(events);
+  const modelCatalog = catalogDays == null || catalogDays > days ? summarizeModelUsage(catalogEvents) : summarizeModelUsage(events);
 
   if (!events.length) {
     return {
@@ -185,7 +188,7 @@ function readRecentEvents({ since, root }) {
             outputChars += step.content.length;
           }
 
-          if (Number.isFinite(t)) {
+          if (Number.isFinite(t) && isGeminiModel(currentModel)) {
             const inputTokens = Math.round(runningInputChars / CHARS_PER_TOKEN);
             const outputTokens = Math.round(outputChars / CHARS_PER_TOKEN);
             const reasoningTokens = Math.round(reasoningChars / CHARS_PER_TOKEN);
@@ -213,12 +216,14 @@ function readRecentEvents({ since, root }) {
       }
     }
     return fileEvents;
-  }, { namespace: "antigravity" });
+  }, { namespace: "antigravity", retainDeleted: true });
 
   const events = [];
   for (const fileEvents of Object.values(allParsedData)) {
     for (const ev of fileEvents) {
-      if (ev.t >= since) {
+      // Retained caches may contain older third-party events. Enforce the
+      // Gemini-only product policy again when materializing cached history.
+      if (ev.t >= since && isGeminiModel(ev.model)) {
         events.push(ev);
       }
     }
@@ -231,12 +236,16 @@ function extractModel(step) {
   if (step.type === "USER_INPUT" && typeof step.content === "string") {
     const settingsBlock = step.content.match(/<USER_SETTINGS_CHANGE>([\s\S]*?)(?:<\/USER_SETTINGS_CHANGE>|$)/i)?.[1] || "";
     const settingsChangeMatch = settingsBlock.match(
-      /Model Selection`?\s+from\s+\S+\s+to\s+([\s\S]+?)(?:\.\s+(?=[A-Z\u4e00-\u9fa5])|$)/i
+      /Model Selection`?\s+from\s+[\s\S]+?\s+to\s+([\s\S]+?)(?:\.\s+(?=[A-Z\u4e00-\u9fa5])|$)/i
     );
     if (settingsChangeMatch) return settingsChangeMatch[1].trim().replace(/\.$/, "");
   }
   if (typeof step.model === "string" && step.model.trim()) return step.model.trim();
   return null;
+}
+
+function isGeminiModel(model) {
+  return typeof model === "string" && /(?:^|[^a-z0-9])gemini(?:[^a-z0-9]|$)/i.test(model.trim());
 }
 
 function summarizeModelUsage(events) {
@@ -246,7 +255,9 @@ function summarizeModelUsage(events) {
     if (!models.has(model)) {
       models.set(model, { model, input: 0, cached: null, output: 0, reasoning: 0, total: 0 });
     }
-    addUsageToBucket(models.get(model), event);
+    const bucket = models.get(model);
+    addUsageToBucket(bucket, event);
+    addSettledUsageCost(bucket, { ...event, source: "antigravity" }, model);
   }
   return [...models.values()].sort((a, b) => b.total - a.total || a.model.localeCompare(b.model));
 }
@@ -284,5 +295,6 @@ module.exports = {
   readDailyTokenHistory,
   readHourlyTokenHistory,
   readTokenHistory,
-  extractModel
+  extractModel,
+  isGeminiModel
 };

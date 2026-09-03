@@ -25,7 +25,7 @@ function readGeminiTokenHistory(options = {}) {
 
 function readGeminiEvents({ roots = defaultGeminiRoots() } = {}) {
   const files = listGeminiSessionFiles(roots);
-  const parsed = scanFilesIncrementally(files, readGeminiSessionFile, { namespace: "gemini" });
+  const parsed = scanFilesIncrementally(files, readGeminiSessionFile, { namespace: "gemini", retainDeleted: true });
   const events = [];
   const seen = new Set();
   for (const [file, fileEvents] of Object.entries(parsed)) {
@@ -44,7 +44,7 @@ function readGeminiSessionFile(file) {
   try {
     record = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
-    return [];
+    throw new Error("Invalid Gemini session JSON");
   }
   if (!record || !Array.isArray(record.messages)) return [];
   const session = text(record.sessionId) || path.basename(file, path.extname(file));

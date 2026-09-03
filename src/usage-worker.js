@@ -18,12 +18,16 @@ const {
   readGeminiTokenUsage
 } = require("./gemini-token-service");
 const {
-  readOpenCodeStatsUsage,
-  readOpenCodeTokenHistory
+  readOpenCodeTokenHistory,
+  readOpenCodeTokenUsage
 } = require("./opencode-token-service");
 
 function readUsageWithModelCatalog(reader, payload = {}) {
-  return reader({ ...payload, catalogDays: 45 });
+  return reader({ ...payload, catalogDays: null });
+}
+
+function readOpenCodeUsageWithModelCatalog(payload = {}) {
+  return readOpenCodeTokenUsage({ days: payload.days || 1, catalogDays: null });
 }
 
 function localSources(payload = {}) {
@@ -35,7 +39,7 @@ function readCombinedLocalUsage(payload = {}) {
   const usages = [];
   const sessionSources = sources.filter((source) => source === "codex" || source === "claude");
   if (sessionSources.length) usages.push(readUsageWithModelCatalog(readLocalTokenUsage, { ...payload, sources: sessionSources }));
-  if (sources.includes("opencode")) usages.push(readOpenCodeStatsUsage({ days: payload.days || 1 }));
+  if (sources.includes("opencode")) usages.push(readOpenCodeUsageWithModelCatalog(payload));
   if (sources.includes("gemini")) usages.push(readUsageWithModelCatalog(readGeminiTokenUsage, payload));
   if (sources.includes("cline")) usages.push(readUsageWithModelCatalog(readClineTokenUsage, payload));
   return mergeUsageSummaries(usages);
@@ -83,6 +87,7 @@ function mergeUsageSummaries(usages) {
     cacheHitRate: hasData && sum.input > 0 ? Math.round((sum.cached / sum.input) * 100) : null,
     modelUsage: sortAndDeduplicateModels(modelUsage),
     modelCatalog: sortAndDeduplicateModels(modelCatalog),
+    modelCatalogRange: "all",
     sessions,
     error: hasData ? null : "No enabled local agent usage found"
   };
@@ -167,7 +172,7 @@ function readCumulative({ selection = "all", model, source = null, enableCodex =
   const wantsCline = !selected.source || selected.source === "cline";
   if (enableCodex && wantsCodex) addUsage(readLocalTokenUsage({ days: 9999, sources: ["codex"] }), true, "codex");
   if (enableClaudeCode && wantsClaude) addUsage(readLocalTokenUsage({ days: 9999, sources: ["claude"] }), true, "claude");
-  if (enableOpenCode && wantsOpenCode) addUsage(readOpenCodeStatsUsage({ days: null }), true, "opencode");
+  if (enableOpenCode && wantsOpenCode) addUsage(readOpenCodeTokenUsage({ days: null, catalogDays: null }), true, "opencode");
   if (enableGeminiCli && wantsGemini) addUsage(readGeminiTokenUsage({ days: 9999 }), true, "gemini");
   if (enableCline && wantsCline) addUsage(readClineTokenUsage({ days: 9999 }), true, "cline");
   if (enableAntigravity && wantsAntigravity) addUsage(readAntigravityUsage({ days: 9999 }), false, "antigravity");

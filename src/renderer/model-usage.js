@@ -7,6 +7,11 @@
 })(typeof window === "undefined" ? null : window, () => {
   const KNOWN_SOURCES = new Set(["codex", "claude", "opencode", "gemini", "cline", "antigravity"]);
 
+  function isAllowedSourceModel(source, model) {
+    return source !== "antigravity"
+      || (typeof model === "string" && /(?:^|[^a-z0-9])gemini(?:[^a-z0-9]|$)/i.test(model));
+  }
+
   function parseModelSelection(selection) {
     if (selection === "all") return { kind: "all", source: null, model: "all" };
     if (selection.startsWith("source:")) return { kind: "source", source: selection.slice(7), model: "all" };
@@ -18,26 +23,46 @@
   }
 
   function buildMergedModels(snapshot) {
-    const allModels = [];
-    const addModels = (list, defaultSource, currentUsage) => {
+    const currentKeys = new Set();
+    const markCurrentModels = (list, defaultSource) => {
       if (!Array.isArray(list)) return;
       for (const item of list) {
         const source = item.source || defaultSource;
+        if (!isAllowedSourceModel(source, item.model)) continue;
+        currentKeys.add(`${source}:${item.model}`);
+      }
+    };
+    markCurrentModels(snapshot?.localTokenUsage?.modelUsage, "codex");
+    markCurrentModels(snapshot?.quota?.tokenStats?.modelUsage, "codex");
+    markCurrentModels(snapshot?.antigravityTokenUsage?.modelUsage, "antigravity");
+
+    const allModels = [];
+    const addModels = (list, defaultSource) => {
+      if (!Array.isArray(list)) return;
+      for (const item of list) {
+        const source = item.source || defaultSource;
+        if (!isAllowedSourceModel(source, item.model)) continue;
+        const sourceModel = `${source}:${item.model}`;
+        const total = Number(item.total);
+        if (!Number.isFinite(total) || total <= 0) continue;
         allModels.push({
           ...item,
           source,
-          currentUsage,
-          sourceModel: `${source}:${item.model}`,
+          currentUsage: currentKeys.has(sourceModel),
+          sourceModel,
           displayLabel: item.model
         });
       }
     };
 
-    addModels(snapshot?.localTokenUsage?.modelUsage, "codex", true);
-    addModels(snapshot?.quota?.tokenStats?.modelUsage, "codex", true);
-    addModels(snapshot?.antigravityTokenUsage?.modelUsage, "antigravity", true);
-    addModels(snapshot?.localTokenUsage?.modelCatalog, "codex", false);
-    addModels(snapshot?.antigravityTokenUsage?.modelCatalog, "antigravity", false);
+    // Catalogs cover the complete retained history and therefore provide the
+    // correct ranking totals. Current usage is only a fallback for sources
+    // without a catalog, so a one-day total cannot overwrite the full rank.
+    addModels(snapshot?.localTokenUsage?.modelCatalog, "codex");
+    addModels(snapshot?.antigravityTokenUsage?.modelCatalog, "antigravity");
+    addModels(snapshot?.localTokenUsage?.modelUsage, "codex");
+    addModels(snapshot?.quota?.tokenStats?.modelUsage, "codex");
+    addModels(snapshot?.antigravityTokenUsage?.modelUsage, "antigravity");
 
     const seen = new Set();
     return allModels.filter((item) => {
@@ -76,7 +101,10 @@
 
   function mergeSourceTokens(snapshot, source) {
     if (source === "antigravity") {
-      return mergeTokenItems(snapshot?.antigravityTokenUsage?.modelUsage, source);
+      return mergeTokenItems(
+        snapshot?.antigravityTokenUsage?.modelUsage?.filter((item) => isAllowedSourceModel(source, item.model)),
+        source
+      );
     }
     const localModels = (snapshot?.localTokenUsage?.modelUsage || [])
       .filter((item) => !item.source || item.source === source);
@@ -133,7 +161,7 @@
     const localUsage = snapshot?.localTokenUsage;
     if (localUsage?.total != null) add(localUsage);
     else if (quotaStats?.total != null) add(quotaStats);
-    add(snapshot?.antigravityTokenUsage, true);
+    add(mergeSourceTokens(snapshot, "antigravity"), true);
     if (!hasData) return null;
     return {
       source: "merged",
@@ -150,6 +178,7 @@
     const add = (items, defaultSource) => {
       for (const item of items || []) {
         const source = item.source || defaultSource;
+        if (!isAllowedSourceModel(source, item.model)) continue;
         const key = `${source}:${item.model}`;
         if (seen.has(key)) continue;
         seen.add(key);

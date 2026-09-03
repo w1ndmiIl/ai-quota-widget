@@ -4,10 +4,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { scanFilesIncrementally } = require("./incremental-scan-engine");
+const { addSettledUsageCost } = require("./usage-cost-settlement");
 
 function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, root = defaultSessionsRoot(), sources = null } = {}) {
   const since = now - days * 24 * 60 * 60 * 1000;
-  const catalogSince = now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
+  const catalogSince = catalogDays == null
+    ? 0
+    : now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
   const recent = readRecentUsageEvents({ since: catalogSince, root });
   const sessions = new Set(recent.events.map((event) => event.file));
   const eventFiles = new Set(recent.events.map((usage) => usage.file));
@@ -33,7 +36,7 @@ function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, r
     { input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 }
   );
   const modelUsage = summarizeModelUsage(usages);
-  const modelCatalog = catalogDays > days ? summarizeModelUsage(catalogUsages) : modelUsage;
+  const modelCatalog = catalogDays == null || catalogDays > days ? summarizeModelUsage(catalogUsages) : modelUsage;
 
   if (!usages.length) {
     return {
@@ -113,35 +116,67 @@ function readRecentUsageEvents({ since, root }) {
   const filePaths = fileEntries.map(({ file }) => file);
   const sourceByFile = new Map(fileEntries.map(({ file, source }) => [file, source]));
   const allParsedData = scanFilesIncrementally(filePaths, (file) => {
+    const source = sourceByFile.get(file);
     const allFileEvents = readUsageEvents(file, sourceByFile.get(file));
     let fallback = null;
     if (!allFileEvents.length) {
-      fallback = readLatestUsage(file);
+      const latest = readLatestUsage(file);
+      fallback = latest ? {
+        ...latest,
+        t: safeStat(file)?.mtimeMs ?? 0,
+        ...(source ? { source } : {})
+      } : null;
     }
     return { events: allFileEvents, fallback };
-  }, { namespace: "codex-and-claude" });
+  }, { namespace: "codex-and-claude", retainDeleted: true });
 
   const events = [];
   const fallbacks = [];
+  const seenEvents = new Set();
+  const seenFallbacks = new Set();
 
   for (const [file, data] of Object.entries(allParsedData)) {
     if (data.events && data.events.length) {
       for (const ev of data.events) {
         if (ev.t >= since) {
+          const signature = usageEventSignature(file, ev);
+          if (seenEvents.has(signature)) continue;
+          seenEvents.add(signature);
           events.push({ file, ...ev });
         }
       }
     } else if (data.fallback) {
       const stat = safeStat(file);
       const mtimeMs = stat?.mtimeMs ?? 0;
-      if (mtimeMs >= since) {
-        const source = sourceByFile.get(file);
-        fallbacks.push({ file, t: mtimeMs, model: "unknown", ...(source ? { source } : {}), ...data.fallback });
+      const fallbackTime = mtimeMs || data.fallback.t || 0;
+      if (fallbackTime >= since) {
+        const source = data.fallback.source ?? sourceByFile.get(file);
+        const fallback = { file, t: fallbackTime, model: "unknown", ...(source ? { source } : {}), ...data.fallback };
+        const signature = usageEventSignature(file, fallback);
+        if (seenFallbacks.has(signature)) continue;
+        seenFallbacks.add(signature);
+        fallbacks.push(fallback);
       }
     }
   }
 
   return { events, fallbacks };
+}
+
+function usageEventSignature(file, event) {
+  const session = path.basename(file, path.extname(file));
+  return [
+    event.source || "",
+    session,
+    event.t || 0,
+    event.model || "unknown",
+    event.input || 0,
+    event.cached || 0,
+    event.cacheWrite || 0,
+    event.output || 0,
+    event.reasoning || 0,
+    event.total || 0
+  ].join("\u0000");
 }
 
 function matchesModel(usage, model, source = null) {
@@ -186,7 +221,9 @@ function summarizeModelUsage(usages) {
     if (!models.has(key)) {
       models.set(key, { model, ...(source ? { source } : {}), input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 });
     }
-    addUsageToBucket(models.get(key), usage);
+    const bucket = models.get(key);
+    addUsageToBucket(bucket, usage);
+    addSettledUsageCost(bucket, usage, model);
   }
   return [...models.values()].sort((a, b) => b.total - a.total || a.model.localeCompare(b.model));
 }

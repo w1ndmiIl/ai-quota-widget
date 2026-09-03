@@ -4,6 +4,7 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, globalShortcut } =
 const path = require("node:path");
 const fs = require("node:fs");
 const { loadAppConfig, normalizeAppConfig, persistAppConfig, sourceConfigChanged } = require("./app-config-store");
+const { AntigravityQuotaService } = require("./antigravity-quota-service");
 const { CodexService } = require("./codex-service");
 const { DashboardSnapshotStore } = require("./dashboard-snapshot-store");
 const { readResetCredits } = require("./reset-credits-service");
@@ -51,13 +52,16 @@ const usageWorkerClient = new UsageWorkerClient(path.join(__dirname, "usage-work
 const usageCoordinator = new UsageCoordinator({ workerClient: usageWorkerClient, getConfig: () => appConfig });
 
 const codex = new CodexService();
+const antigravityQuota = new AntigravityQuotaService({ userDataPath });
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let isCompact = false;
 let registeredHotkeys = {};
 let backgroundIdleTimer = null;
+let antigravityQuotaTimer = null;
 const BACKGROUND_IDLE_MS = 30_000;
+const ANTIGRAVITY_QUOTA_REFRESH_MS = 5 * 60_000;
 
 function toggleMainPanel() {
   if (!mainWindow) return;
@@ -87,6 +91,7 @@ function scheduleBackgroundIdle() {
     backgroundIdleTimer = null;
     if (mainWindow?.isVisible()) return;
     codex.dispose();
+    antigravityQuota.dispose();
     usageCoordinator.stop();
   }, BACKGROUND_IDLE_MS);
   backgroundIdleTimer.unref?.();
@@ -104,7 +109,7 @@ function hotkeyRegistrations(hotkeys) {
   return [
     [hotkeys.togglePanel, toggleMainPanel],
     [hotkeys.toggleCompact, () => resizeWindow(!isCompact)],
-    [hotkeys.refresh, () => refreshAndPush().catch(() => {})],
+    [hotkeys.refresh, () => refreshAndPush({ allowAntigravityStart: true }).catch(() => {})],
     [hotkeys.togglePin, toggleAlwaysOnTop]
   ].filter(([accelerator]) => accelerator);
 }
@@ -178,7 +183,7 @@ function createTray() {
       { label: "显示 / 隐藏", click: toggleMainPanel },
       { label: "切换紧凑模式", click: () => resizeWindow(!isCompact) },
       { label: "切换置顶", click: toggleAlwaysOnTop },
-      { label: "刷新数据", click: () => refreshAndPush().catch(() => {}) },
+      { label: "刷新数据", click: () => refreshAndPush({ allowAntigravityStart: true }).catch(() => {}) },
       { type: "separator" },
       {
         label: "退出",
@@ -197,21 +202,26 @@ function createTray() {
 }
 
 
-let cachedResetCredits = null;
-let lastResetCreditsTime = 0;
+const initialResetCreditsSnapshot = snapshotStore.getCached();
+let cachedResetCredits = initialResetCreditsSnapshot?.resetCredits ?? null;
+let lastResetCreditsTime = cachedResetCredits ? Number(initialResetCreditsSnapshot?.updatedAt) || 0 : 0;
 let resetCreditsPending = null;
 const RESET_CREDITS_CACHE_TTL = 5 * 60_000;
 let snapshotInFlight = null;
+let snapshotInFlightAllowsAntigravityStart = false;
 
 async function readCachedResetCredits() {
-  if (cachedResetCredits && Date.now() - lastResetCreditsTime < RESET_CREDITS_CACHE_TTL) {
+  const now = Date.now();
+  if (now - lastResetCreditsTime < RESET_CREDITS_CACHE_TTL) {
     return cachedResetCredits;
   }
   if (resetCreditsPending) return resetCreditsPending;
+  // Back off after both success and failure. The endpoint is auxiliary and may
+  // rate-limit rapid refreshes; keep any last known valid card data meanwhile.
+  lastResetCreditsTime = now;
   resetCreditsPending = readResetCredits()
     .then((credits) => {
       cachedResetCredits = credits;
-      lastResetCreditsTime = Date.now();
       const cached = snapshotStore.getCached();
       if (cached) {
         const snapshot = { ...cached, resetCredits: credits, stale: false, updatedAt: Date.now() };
@@ -226,12 +236,13 @@ async function readCachedResetCredits() {
   return resetCreditsPending;
 }
 
-async function readSnapshot() {
+async function readSnapshot({ allowAntigravityStart = false } = {}) {
   const errors = [];
   let quota = null;
   let resetCredits = null;
   let localTokenUsage = null;
   let antigravityTokenUsage = null;
+  let antigravityQuotaSnapshot = appConfig.enableAntigravity ? antigravityQuota.getCachedQuota() : null;
   let quotaError = null;
 
   const now = Date.now();
@@ -239,6 +250,15 @@ async function readSnapshot() {
     appConfig.enableAntigravity ? usageCoordinator.readAntigravityUsage(now) : Promise.resolve(null),
     usageCoordinator.enabledLocalSources().length ? usageCoordinator.readLocalUsage(now) : Promise.resolve(null)
   ]);
+  const antigravityQuotaResult = appConfig.enableAntigravity
+    ? Promise.resolve(antigravityQuota.readQuota({
+      allowStart: allowAntigravityStart,
+      force: allowAntigravityStart
+    })).then(
+      (value) => ({ status: "fulfilled", value }),
+      (reason) => ({ status: "rejected", reason })
+    )
+    : Promise.resolve({ status: "fulfilled", value: null });
 
   if (appConfig.enableCodex) {
     quota = codex.getCachedQuota();
@@ -260,11 +280,17 @@ async function readSnapshot() {
 
   // Parse local logs in a worker so a large transcript cannot block Electron's main loop.
   const [antigravityResult, localResult] = await tokenUsageResults;
+  const quotaSourceResult = await antigravityQuotaResult;
   resetCredits = cachedResetCredits;
   if (antigravityResult.status === "fulfilled") {
     antigravityTokenUsage = antigravityResult.value;
   } else {
     errors.push(antigravityResult.reason.message);
+  }
+  if (quotaSourceResult.status === "fulfilled") {
+    antigravityQuotaSnapshot = quotaSourceResult.value;
+  } else {
+    errors.push(quotaSourceResult.reason.message);
   }
   if (localResult.status === "fulfilled") {
     localTokenUsage = localResult.value;
@@ -288,6 +314,7 @@ async function readSnapshot() {
     resetCredits,
     localTokenUsage,
     antigravityTokenUsage,
+    antigravityQuota: antigravityQuotaSnapshot,
     config: appConfig,
     // 重置卡和本地统计是辅助信息；它们失败时不能把一份成功的额度读数标成“刷新失败”。
     error: quotaError,
@@ -298,17 +325,44 @@ async function readSnapshot() {
   return snapshot;
 }
 
-function readSnapshotOnce() {
-  if (!snapshotInFlight) {
-    snapshotInFlight = readSnapshot().finally(() => {
-      snapshotInFlight = null;
-    });
+async function readSnapshotOnce({ allowAntigravityStart = false } = {}) {
+  if (snapshotInFlight) {
+    if (!allowAntigravityStart || snapshotInFlightAllowsAntigravityStart) return snapshotInFlight;
+    try { await snapshotInFlight; } catch {}
   }
+  snapshotInFlightAllowsAntigravityStart = allowAntigravityStart;
+  snapshotInFlight = readSnapshot({ allowAntigravityStart }).finally(() => {
+    snapshotInFlight = null;
+    snapshotInFlightAllowsAntigravityStart = false;
+  });
   return snapshotInFlight;
 }
 
-async function refreshAndPush() {
-  const snapshot = await readSnapshotOnce();
+function startAntigravityQuotaRefresh() {
+  if (antigravityQuotaTimer) return;
+  antigravityQuotaTimer = setInterval(() => {
+    refreshRunningAntigravityQuota().catch(() => {});
+  }, ANTIGRAVITY_QUOTA_REFRESH_MS);
+  antigravityQuotaTimer.unref?.();
+}
+
+async function refreshRunningAntigravityQuota() {
+  if (!appConfig.enableAntigravity) return null;
+  const previous = antigravityQuota.getCachedQuota();
+  const next = await antigravityQuota.readQuota({ allowStart: false, force: true });
+  if (!next || next.updatedAt === previous?.updatedAt) return previous;
+
+  const cached = snapshotStore.getCached();
+  if (cached) {
+    const snapshot = { ...cached, antigravityQuota: next, stale: false, updatedAt: Date.now() };
+    snapshotStore.save(snapshot);
+    mainWindow?.webContents.send("quota:updated", snapshot);
+  }
+  return next;
+}
+
+async function refreshAndPush(options = {}) {
+  const snapshot = await readSnapshotOnce(options);
   mainWindow?.webContents.send("quota:updated", snapshot);
   return snapshot;
 }
@@ -335,7 +389,9 @@ app.whenReady().then(() => {
   ipcMain.handle("quota:cached", () => snapshotStore.getCached());
   // The invoking renderer already receives the returned snapshot; broadcasting
   // it as well would render every refresh twice.
-  ipcMain.handle("quota:refresh", readSnapshotOnce);
+  ipcMain.handle("quota:refresh", (_event, options) => readSnapshotOnce({
+    allowAntigravityStart: options?.manual === true
+  }));
   ipcMain.handle("window:toggleAlwaysOnTop", toggleAlwaysOnTop);
   ipcMain.handle("window:quit", () => {
     mainWindow?.hide();
@@ -389,6 +445,9 @@ app.whenReady().then(() => {
     if (!appConfig.enableCodex) {
       codex.dispose();
     }
+    if (!appConfig.enableAntigravity) {
+      antigravityQuota.dispose();
+    }
     if (sourcesChanged) {
       usageCoordinator.clearCaches();
       refreshAndPush().catch(() => {});
@@ -428,12 +487,16 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   registerGlobalShortcuts(appConfig.hotkeys);
+  startAntigravityQuotaRefresh();
 });
 
 app.on("before-quit", () => {
   isQuitting = true;
   globalShortcut.unregisterAll();
   codex.dispose();
+  antigravityQuota.dispose();
+  if (antigravityQuotaTimer) clearInterval(antigravityQuotaTimer);
+  antigravityQuotaTimer = null;
   cancelBackgroundIdle();
   usageCoordinator.stop(true);
 });

@@ -10,7 +10,7 @@ function normalizeCodexQuota(response) {
   const shortWindow = windows.short;
   const longWindow = windows.long;
   const quotaCard = normalizeQuotaCard(snapshot, shortWindow, longWindow);
-  const resetCard = normalizeResetCard(snapshot, quotaCard);
+  const resetCard = normalizeResetCard(snapshot);
   const tokenStats = normalizeTokenStats(snapshot, response?.accountUsage, shortWindow, longWindow, response?.usageError);
 
   return {
@@ -133,38 +133,46 @@ function normalizeQuotaCard(snapshot, shortWindow, longWindow) {
   };
 }
 
-function normalizeResetCard(snapshot, quotaCard) {
+function normalizeResetCard(snapshot) {
   const credits = snapshot.credits;
   const countValue = firstValue(
     snapshot.resetCount,
     snapshot.resetsRemaining,
     snapshot.resetCredits,
     snapshot.reset_card_count,
-    credits?.remaining,
-    credits?.balance
+    credits?.resetCount,
+    credits?.reset_count,
+    credits?.availableCount,
+    credits?.available_count
   );
   const expiresAt = firstTimestamp(
-    credits?.expiresAt,
-    credits?.expires_at,
-    credits?.resetsAt,
+    credits?.resetExpiresAt,
+    credits?.reset_expires_at,
     credits?.resetAt,
+    credits?.reset_at,
     snapshot.resetCardExpiresAt,
-    snapshot.resetExpiresAt,
-    quotaCard?.expiresAt
+    snapshot.resetExpiresAt
   );
+  const count = readNonNegativeInteger(countValue);
+  const unlimited = Boolean(snapshot.resetUnlimited ?? credits?.resetUnlimited);
 
-  if (!credits && countValue == null && !expiresAt) {
+  if (count == null && !unlimited && !expiresAt) {
     return null;
   }
 
   return {
-    hasCredits: credits?.hasCredits ?? countValue != null,
-    unlimited: Boolean(credits?.unlimited),
-    count: readNumber(countValue, null),
-    countLabel: credits?.unlimited ? "无限" : countValue == null ? "--" : String(countValue),
+    hasCredits: unlimited || count != null,
+    unlimited,
+    count,
+    countLabel: unlimited ? "无限" : count == null ? "--" : String(count),
     expiresAt,
-    source: credits ? "credits" : "snapshot"
+    source: credits && countValue != null ? "credits" : "snapshot"
   };
+}
+
+function readNonNegativeInteger(value) {
+  const number = readNumber(value, NaN);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
 
 function normalizeTokenStats(snapshot, accountUsage, shortWindow, longWindow, usageError) {

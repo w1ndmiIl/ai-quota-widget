@@ -26,7 +26,7 @@ function readClineTokenHistory(options = {}) {
 
 function readClineEvents({ roots = defaultClineRoots() } = {}) {
   const files = listClineMessageFiles(roots);
-  const parsed = scanFilesIncrementally(files, readClineMessageFile, { namespace: "cline" });
+  const parsed = scanFilesIncrementally(files, readClineMessageFile, { namespace: "cline", retainDeleted: true });
   const events = [];
   const seen = new Set();
   for (const [file, fileEvents] of Object.entries(parsed)) {
@@ -46,7 +46,7 @@ function readClineMessageFile(file) {
   try {
     rows = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
-    return [];
+    throw new Error("Invalid Cline message JSON");
   }
   if (!Array.isArray(rows)) return [];
   const fallbackModel = readTaskModel(path.dirname(file));

@@ -35,10 +35,11 @@ Shrink the window to `336 × 72` logical pixels with only the two quota periods 
 ## Features
 
 - Reads the current account quota and reset time from the local Codex `app-server`.
+- Refreshes the shared Gemini 5-hour and weekly quota every five minutes while Antigravity is running; when it is closed, only an explicit refresh briefly starts the official background service and then exits.
 - Shows reset-card counts, status, and expiry details.
 - Calculates token usage from local Codex, Claude Code, OpenCode, Gemini CLI, and Cline sessions.
 - Estimates the USD value of tokens from each model's public standard text API rates (not a subscription bill).
-- Estimates token usage from local Antigravity sessions; this is not official billing data.
+- Estimates Gemini-model token usage from local Antigravity sessions; external models are excluded and this is not official billing data.
 - Provides model filters, trend charts, a daily heatmap, and cache-hit rates where available.
 - Provides complete Chinese and English interfaces with light and dark themes.
 - Supports tray operation, always-on-top, a `336 × 72` compact mode, and single-instance startup.
@@ -53,7 +54,7 @@ Shrink the window to `336 × 72` logical pixels with only the two quota periods 
 | OpenCode | Local OpenCode CLI statistics and sanitized session exports |
 | Gemini CLI | Session token summaries under `~/.gemini/tmp/<project>/chats/` |
 | Cline | Task logs in VS Code-family global storage and `~/.cline/data` |
-| Antigravity | Local session-transcript estimates |
+| Antigravity | Short-lived official background service for Gemini 5h/weekly quota, plus local transcript estimates |
 
 OpenCode, Gemini CLI, and Cline are the new agent sources prioritized by public adoption, and the interface follows that order. The ranking uses reproducible GitHub stars as a popularity proxy (2026-08-10 snapshot: OpenCode 195.7k, Gemini CLI 106.4k, Cline 65.9k), not as a claim of actual active-user counts. OpenCode requires an installed local CLI. Gemini CLI reads token summaries from its official session records. Cline covers common data locations for VS Code, VS Code Insiders, VSCodium, Cursor, Windsurf, and Cline CLI.
 

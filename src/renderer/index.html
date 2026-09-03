@@ -17,7 +17,11 @@
             <span id="appStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
           </div>
           <div class="window-actions">
-            <span class="plan-pill">PLUS</span>
+            <div id="quotaModeToggle" class="quota-mode-toggle" role="radiogroup" aria-label="额度来源">
+              <button id="quotaModeCodex" class="quota-mode-button active" type="button" role="radio" aria-checked="true" data-mode="codex">Codex</button>
+              <button id="quotaModeAntigravity" class="quota-mode-button" type="button" role="radio" aria-checked="false" data-mode="antigravity">Antigravity</button>
+              <span class="quota-mode-slider" aria-hidden="true"></span>
+            </div>
             <button id="refreshButton" class="icon-button" title="手动刷新" aria-label="手动刷新">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M20 11a8 8 0 1 0-2.34 5.66" />
@@ -242,7 +246,10 @@
       <div class="settings-backdrop"></div>
       <div id="settingsCard" class="settings-card" role="dialog" aria-modal="true" aria-label="设置">
         <header class="settings-head">
-          <strong id="settingsTitle">设置</strong>
+          <div class="settings-title-group">
+            <strong id="settingsTitle">设置</strong>
+            <span id="settingsSubtitle">界面、数据源与快捷键</span>
+          </div>
           <button id="settingsClose" class="icon-button" title="关闭" aria-label="关闭设置">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M8 8l8 8M16 8l-8 8" />
@@ -250,86 +257,106 @@
           </button>
         </header>
         <div class="settings-body">
-          <label class="setting-row">
-            <span id="langLabel">语言 / Language</span>
-            <select id="langSelect">
-              <option value="zh">中文</option>
-              <option value="en">English</option>
-            </select>
-          </label>
-          <label class="setting-row">
-            <span id="themeLabel">主题</span>
-            <select id="themeSelect">
-              <option value="light" id="themeOptLight">亮色</option>
-              <option value="dark" id="themeOptDark">暗色</option>
-            </select>
-          </label>
-          <div class="setting-section">
-            <strong class="setting-section-title" id="sourceSectionTitle">启用的数据源</strong>
-            <label class="setting-checkbox-row">
-              <input type="checkbox" id="cfgCodex" />
-              <span id="labelCodex">OpenAI Codex 额度与日志</span>
-            </label>
-            <label class="setting-checkbox-row">
-              <input type="checkbox" id="cfgClaudeCode" />
-              <span id="labelClaudeCode">Claude Code 本地日志</span>
-            </label>
-            <label class="setting-checkbox-row">
-              <input type="checkbox" id="cfgOpenCode" />
-              <span id="labelOpenCode">OpenCode 本地会话</span>
-            </label>
-            <label class="setting-checkbox-row">
-              <input type="checkbox" id="cfgGeminiCli" />
-              <span id="labelGeminiCli">Gemini CLI 本地会话</span>
-            </label>
-            <label class="setting-checkbox-row">
-              <input type="checkbox" id="cfgCline" />
-              <span id="labelCline">Cline 本地日志</span>
-            </label>
-            <label class="setting-checkbox-row">
-              <input type="checkbox" id="cfgAntigravity" />
-              <span id="labelAntigravity">Antigravity 会话估算</span>
-            </label>
-          </div>
-          <div class="setting-section hotkey-section">
+          <section class="setting-section settings-preferences">
+            <div class="setting-section-heading">
+              <strong class="setting-section-title" id="appearanceSectionTitle">外观</strong>
+              <p class="setting-section-hint" id="appearanceSectionHint">调整界面语言和明暗主题</p>
+            </div>
+            <div class="setting-select-grid">
+              <div class="setting-row">
+                <span id="langLabel">语言 / Language</span>
+                <span id="langSelect" class="setting-choice-group" role="radiogroup" aria-labelledby="langLabel" data-value="zh">
+                  <button class="setting-choice active" type="button" role="radio" aria-checked="true" data-value="zh">中文</button>
+                  <button class="setting-choice" type="button" role="radio" aria-checked="false" data-value="en">English</button>
+                </span>
+              </div>
+              <div class="setting-row">
+                <span id="themeLabel">主题</span>
+                <span id="themeSelect" class="setting-choice-group" role="radiogroup" aria-labelledby="themeLabel" data-value="light">
+                  <button id="themeChoiceLight" class="setting-choice active" type="button" role="radio" aria-checked="true" data-value="light">亮色</button>
+                  <button id="themeChoiceDark" class="setting-choice" type="button" role="radio" aria-checked="false" data-value="dark">暗色</button>
+                </span>
+              </div>
+            </div>
+          </section>
+          <section class="setting-section">
+            <div class="setting-section-heading">
+              <strong class="setting-section-title" id="sourceSectionTitle">启用的数据源</strong>
+              <p class="setting-section-hint" id="sourceSectionHint">只读取需要汇总的本地来源</p>
+            </div>
+            <div class="setting-source-grid">
+              <label class="setting-checkbox-row">
+                <span id="labelCodex">OpenAI Codex 额度与日志</span>
+                <input type="checkbox" id="cfgCodex" />
+              </label>
+              <label class="setting-checkbox-row">
+                <span id="labelClaudeCode">Claude Code 本地日志</span>
+                <input type="checkbox" id="cfgClaudeCode" />
+              </label>
+              <label class="setting-checkbox-row">
+                <span id="labelOpenCode">OpenCode 本地会话</span>
+                <input type="checkbox" id="cfgOpenCode" />
+              </label>
+              <label class="setting-checkbox-row">
+                <span id="labelGeminiCli">Gemini CLI 本地会话</span>
+                <input type="checkbox" id="cfgGeminiCli" />
+              </label>
+              <label class="setting-checkbox-row">
+                <span id="labelCline">Cline 本地日志</span>
+                <input type="checkbox" id="cfgCline" />
+              </label>
+              <label class="setting-checkbox-row">
+                <span id="labelAntigravity">Antigravity 额度与会话估算</span>
+                <input type="checkbox" id="cfgAntigravity" />
+              </label>
+            </div>
+          </section>
+          <section class="setting-section hotkey-section">
             <div class="hotkey-section-head">
-              <strong class="setting-section-title" id="hotkeySectionTitle">快捷键</strong>
+              <div class="setting-section-heading">
+                <strong class="setting-section-title" id="hotkeySectionTitle">快捷键</strong>
+                <p id="hotkeyHint" class="setting-section-hint">点击输入框后按下组合键；留空可关闭对应快捷键。</p>
+              </div>
               <button id="hotkeyRestoreDefaults" class="hotkey-text-button" type="button">恢复默认</button>
             </div>
-            <p id="hotkeyHint" class="hotkey-hint">点击输入框后按下组合键；留空可关闭对应快捷键。</p>
-            <div class="hotkey-row">
-              <span id="hotkeyTogglePanelLabel">显示 / 隐藏主面板</span>
-              <span class="hotkey-control">
-                <input id="hotkeyTogglePanel" class="hotkey-input" type="text" readonly placeholder="未设置" aria-label="显示或隐藏主面板快捷键" />
-                <button id="hotkeyTogglePanelClear" class="hotkey-clear-button" type="button" aria-label="清除快捷键">清除</button>
-              </span>
+            <div class="hotkey-grid">
+              <div class="hotkey-row">
+                <span id="hotkeyTogglePanelLabel">显示 / 隐藏主面板</span>
+                <span class="hotkey-control">
+                  <input id="hotkeyTogglePanel" class="hotkey-input" type="text" readonly placeholder="未设置" aria-label="显示或隐藏主面板快捷键" />
+                  <button id="hotkeyTogglePanelClear" class="hotkey-clear-button" type="button" aria-label="清除快捷键">清除</button>
+                </span>
+              </div>
+              <div class="hotkey-row">
+                <span id="hotkeyToggleCompactLabel">切换紧凑模式</span>
+                <span class="hotkey-control">
+                  <input id="hotkeyToggleCompact" class="hotkey-input" type="text" readonly placeholder="未设置" aria-label="切换紧凑模式快捷键" />
+                  <button id="hotkeyToggleCompactClear" class="hotkey-clear-button" type="button" aria-label="清除快捷键">清除</button>
+                </span>
+              </div>
+              <div class="hotkey-row">
+                <span id="hotkeyRefreshLabel">刷新数据</span>
+                <span class="hotkey-control">
+                  <input id="hotkeyRefresh" class="hotkey-input" type="text" readonly placeholder="未设置" aria-label="刷新数据快捷键" />
+                  <button id="hotkeyRefreshClear" class="hotkey-clear-button" type="button" aria-label="清除快捷键">清除</button>
+                </span>
+              </div>
+              <div class="hotkey-row">
+                <span id="hotkeyTogglePinLabel">切换置顶</span>
+                <span class="hotkey-control">
+                  <input id="hotkeyTogglePin" class="hotkey-input" type="text" readonly placeholder="未设置" aria-label="切换置顶快捷键" />
+                  <button id="hotkeyTogglePinClear" class="hotkey-clear-button" type="button" aria-label="清除快捷键">清除</button>
+                </span>
+              </div>
             </div>
-            <div class="hotkey-row">
-              <span id="hotkeyToggleCompactLabel">切换紧凑模式</span>
-              <span class="hotkey-control">
-                <input id="hotkeyToggleCompact" class="hotkey-input" type="text" readonly placeholder="未设置" aria-label="切换紧凑模式快捷键" />
-                <button id="hotkeyToggleCompactClear" class="hotkey-clear-button" type="button" aria-label="清除快捷键">清除</button>
-              </span>
-            </div>
-            <div class="hotkey-row">
-              <span id="hotkeyRefreshLabel">刷新数据</span>
-              <span class="hotkey-control">
-                <input id="hotkeyRefresh" class="hotkey-input" type="text" readonly placeholder="未设置" aria-label="刷新数据快捷键" />
-                <button id="hotkeyRefreshClear" class="hotkey-clear-button" type="button" aria-label="清除快捷键">清除</button>
-              </span>
-            </div>
-            <div class="hotkey-row">
-              <span id="hotkeyTogglePinLabel">切换置顶</span>
-              <span class="hotkey-control">
-                <input id="hotkeyTogglePin" class="hotkey-input" type="text" readonly placeholder="未设置" aria-label="切换置顶快捷键" />
-                <button id="hotkeyTogglePinClear" class="hotkey-clear-button" type="button" aria-label="清除快捷键">清除</button>
-              </span>
-            </div>
-          </div>
+          </section>
         </div>
         <footer class="settings-foot">
           <span id="settingsStatus" class="settings-status" role="status" aria-live="polite" aria-atomic="true"></span>
-          <button id="settingsSave" class="settings-save-btn">保存</button>
+          <div class="settings-actions">
+            <button id="settingsCancel" class="settings-cancel-btn" type="button">取消</button>
+            <button id="settingsSave" class="settings-save-btn">保存</button>
+          </div>
         </footer>
       </div>
     </section>

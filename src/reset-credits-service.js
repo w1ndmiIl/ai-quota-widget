@@ -23,7 +23,7 @@ function readAccessToken() {
   return token;
 }
 
-function requestJson(url, token, timeoutMs = 1500) {
+function requestJson(url, token, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const request = https.request(
       url,
@@ -75,7 +75,10 @@ function normalizeResetCredits(payload) {
     expiresAt: normalizeDateTime(credit.expires_at)
   })).sort(compareExpiry);
   return {
-    availableCount: readNumber(payload?.available_count, normalizedCredits.filter((credit) => credit.status === "available").length),
+    availableCount: readNonNegativeInteger(
+      payload?.available_count,
+      normalizedCredits.filter((credit) => credit.status === "available").length
+    ),
     credits: normalizedCredits
   };
 }
@@ -106,6 +109,11 @@ function readNumber(value, fallback) {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
   return fallback;
+}
+
+function readNonNegativeInteger(value, fallback) {
+  const number = readNumber(value, fallback);
+  return Number.isSafeInteger(number) && number >= 0 ? number : fallback;
 }
 
 module.exports = {

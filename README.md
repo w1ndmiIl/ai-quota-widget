@@ -35,10 +35,11 @@
 ## 主要功能
 
 - 通过本机 Codex `app-server` 读取当前账号额度和重置时间。
+- Antigravity 运行时每 5 分钟自动读取 Gemini 模型共享的 5h 与周额度；未运行时仅在用户点击刷新后短暂启动官方后台服务，读取完成即退出。
 - 展示重置卡数量、状态和到期时间。
 - 统计本机 Codex、Claude Code、OpenCode、Gemini CLI 和 Cline 会话中的 Token 用量。
 - 按模型公开的标准文本 API 单价估算 Token 的美元价值（不等同于订阅账单）。
-- 根据本机 Antigravity 会话估算 Token 用量；该数据不是官方账单。
+- 根据本机 Antigravity 会话估算 Gemini 模型的 Token 用量；外部模型不纳入统计，该数据不是官方账单。
 - 提供模型筛选、趋势图、每日热力图和可用数据源的缓存命中率。
 - 支持完整的中英文界面、亮色与暗色主题。
 - 支持托盘运行、窗口置顶、`336 × 72` 紧凑模式和单实例运行。
@@ -53,7 +54,7 @@
 | OpenCode | 本机 OpenCode CLI 的统计与脱敏会话导出 |
 | Gemini CLI | `~/.gemini/tmp/<project>/chats/` 中的会话 Token 摘要 |
 | Cline | VS Code 系列全局存储与 `~/.cline/data` 中的任务日志 |
-| Antigravity | 本地会话转录估算 |
+| Antigravity | 短暂启动官方后台服务读取 Gemini 5h/周额度，并从本地会话转录估算 Token |
 
 OpenCode、Gemini CLI 和 Cline 是本轮按公开采用度优先接入的新增 Agent 数据源，界面顺序也按这一优先级排列。排序采用可复核的 GitHub Star 作为热度代理（2026-08-10 快照：OpenCode 195.7k、Gemini CLI 106.4k、Cline 65.9k），不把它冒充为真实活跃用户数。OpenCode 需要本机已安装 CLI；Gemini CLI 读取官方会话记录中的 Token 摘要；Cline 支持 VS Code、VS Code Insiders、VSCodium、Cursor、Windsurf 和 Cline CLI 的常见数据目录。
 

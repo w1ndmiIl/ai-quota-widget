@@ -133,14 +133,49 @@ test("keeps renderer model aggregation behavior in a pure module", () => {
       cacheWrite: 0,
       output: 10,
       reasoning: 0,
-      modelUsage: [{ model: "gpt-5", source: "codex", input: 20, cached: 5, output: 10, total: 30 }],
-      modelCatalog: [{ model: "gpt-5", source: "codex", input: 100, cached: 20, output: 30, total: 130 }]
+      modelUsage: [
+        { model: "gpt-5", source: "codex", input: 20, cached: 5, output: 10, total: 30 },
+        { model: "gpt-5.6", source: "codex", input: 70, cached: 10, output: 30, total: 100 }
+      ],
+      modelCatalog: [
+        { model: "gpt-5", source: "codex", input: 100, cached: 20, output: 30, total: 130 },
+        { model: "gpt-5.6", source: "codex", input: 80, cached: 10, output: 30, total: 120 },
+        { model: "unused", source: "codex", input: 0, cached: 0, output: 0, total: 0 }
+      ]
     },
     antigravityTokenUsage: { total: 7, input: 5, cached: null, output: 2, reasoning: 0, modelUsage: [] }
   };
   const models = ModelUsage.buildMergedModels(snapshot);
-  assert.equal(models.length, 1);
+  assert.equal(models.length, 2);
+  assert.deepEqual(models.map(({ model, total }) => ({ model, total })), [
+    { model: "gpt-5", total: 130 },
+    { model: "gpt-5.6", total: 120 }
+  ]);
   assert.equal(models[0].currentUsage, true);
   assert.equal(ModelUsage.getTokenForModel(snapshot, "codex:gpt-5").total, 30);
-  assert.equal(ModelUsage.getTokenForModel(snapshot, "all").total, 37);
+  // Antigravity totals without a verified Gemini model are excluded.
+  assert.equal(ModelUsage.getTokenForModel(snapshot, "all").total, 30);
+});
+
+test("keeps third-party Antigravity models out of model and aggregate views", () => {
+  const snapshot = {
+    antigravityTokenUsage: {
+      total: 300,
+      input: 240,
+      cached: null,
+      output: 60,
+      modelUsage: [
+        { model: "Gemini 3.8 Flash (High)", input: 80, cached: null, output: 20, total: 100 },
+        { model: "Claude Opus 4.6 (Thinking)", input: 160, cached: null, output: 40, total: 200 }
+      ],
+      modelCatalog: [
+        { model: "Gemini 3.8 Flash (High)", input: 80, cached: null, output: 20, total: 100 },
+        { model: "Claude Opus 4.6 (Thinking)", input: 160, cached: null, output: 40, total: 200 }
+      ]
+    }
+  };
+
+  assert.deepEqual(ModelUsage.buildMergedModels(snapshot).map((item) => item.model), ["Gemini 3.8 Flash (High)"]);
+  assert.equal(ModelUsage.mergeSourceTokens(snapshot, "antigravity").total, 100);
+  assert.equal(ModelUsage.mergeAllTokens(snapshot).total, 100);
 });

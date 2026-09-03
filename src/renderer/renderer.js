@@ -10,8 +10,12 @@ const elements = {
   compactButton: document.getElementById("compactButton"),
   compactIcon: document.getElementById("compactIcon"),
   refreshButton: document.getElementById("refreshButton"),
+  quotaModeToggle: document.getElementById("quotaModeToggle"),
+  quotaModeCodex: document.getElementById("quotaModeCodex"),
+  quotaModeAntigravity: document.getElementById("quotaModeAntigravity"),
   pinButton: document.getElementById("pinButton"),
   closeButton: document.getElementById("closeButton"),
+  quotaSide: document.getElementById("quotaSide"),
   quotaRing: document.getElementById("quotaRing"),
   shortRingTrack: document.getElementById("shortRingTrack"),
   shortRingArc: document.getElementById("shortRingArc"),
@@ -78,6 +82,7 @@ const modalController = createModalController({ background: elements.shell });
 
 let isCompact = localStorage.getItem("compact") === "1";
 let tokenRange = localStorage.getItem("tokenRange") || "24h";
+let quotaMode = localStorage.getItem("quotaMode") === "antigravity" ? "antigravity" : "codex";
 let isRefreshing = false;
 let focusedCard = null;
 let lastSnapshot = null;
@@ -93,6 +98,7 @@ const DEFAULT_HOTKEYS = Object.freeze({
 });
 let history = readHistory();
 let mergedModels = [];
+let selectableModelSources = new Set();
 let latestResetCredits = [];
 let initialDataReady = false;
 const MODEL_SOURCES = [
@@ -123,7 +129,7 @@ function modelSourceLabel(source) {
 
 elements.closeButton.addEventListener("click", () => window.aiQuota.quitWindow());
 elements.compactButton.addEventListener("click", () => setCompact(!isCompact));
-elements.refreshButton.addEventListener("click", refresh);
+elements.refreshButton.addEventListener("click", () => refresh({ manual: true }));
 elements.resetRow.addEventListener("click", (event) => {
   event.stopPropagation();
   openResetDialog();
@@ -145,7 +151,7 @@ elements.shell.addEventListener("click", (event) => {
     return;
   }
   if (event.target === elements.shell || event.target.classList.contains("panel")) {
-    refresh();
+    refresh({ manual: true });
   }
 });
 window.addEventListener("keydown", (event) => {
@@ -198,6 +204,8 @@ async function setupSettings() {
   const cfgAntigravity = document.getElementById("cfgAntigravity");
   const settingsStatus = document.getElementById("settingsStatus");
   const settingsSave = document.getElementById("settingsSave");
+  const settingsCancel = document.getElementById("settingsCancel");
+  const settingsBody = panel.querySelector(".settings-body");
   const hotkeyInputs = {
     togglePanel: document.getElementById("hotkeyTogglePanel"),
     toggleCompact: document.getElementById("hotkeyToggleCompact"),
@@ -215,13 +223,43 @@ async function setupSettings() {
     console.error("Failed to read settings from main process", e);
   }
 
+  const setChoiceValue = (group, value) => {
+    const choices = [...group.querySelectorAll(".setting-choice")];
+    const selected = choices.find((choice) => choice.dataset.value === value) || choices[0];
+    group.dataset.value = selected?.dataset.value || "";
+    for (const choice of choices) {
+      const active = choice === selected;
+      choice.classList.toggle("active", active);
+      choice.setAttribute("aria-checked", String(active));
+      choice.tabIndex = active ? 0 : -1;
+    }
+  };
+  const bindChoiceGroup = (group) => {
+    const choices = [...group.querySelectorAll(".setting-choice")];
+    for (const choice of choices) {
+      choice.addEventListener("click", () => setChoiceValue(group, choice.dataset.value));
+      choice.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const current = Math.max(0, choices.indexOf(choice));
+        const next = event.key === "Home" ? 0
+          : event.key === "End" ? choices.length - 1
+            : (current + (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1) + choices.length) % choices.length;
+        setChoiceValue(group, choices[next].dataset.value);
+        choices[next].focus();
+      });
+    }
+  };
+  bindChoiceGroup(langSelect);
+  bindChoiceGroup(themeSelect);
+
   applyConfigEffects(config);
   document.body.classList.toggle("no-codex", !config.enableCodex);
 
-  langSelect.value = localStorage.getItem("lang") || "zh";
-  themeSelect.value = localStorage.getItem("theme") || "light";
-  applyTheme(themeSelect.value);
-  applyLang(langSelect.value);
+  setChoiceValue(langSelect, localStorage.getItem("lang") || "zh");
+  setChoiceValue(themeSelect, localStorage.getItem("theme") || "light");
+  applyTheme(themeSelect.dataset.value);
+  applyLang(langSelect.dataset.value);
 
   const normalizeHotkeys = (hotkeys) => {
     const source = hotkeys && typeof hotkeys === "object" ? hotkeys : {};
@@ -283,8 +321,8 @@ async function setupSettings() {
 
   // Open settings
   document.getElementById("settingsButton").addEventListener("click", () => {
-    langSelect.value = localStorage.getItem("lang") || "zh";
-    themeSelect.value = localStorage.getItem("theme") || "light";
+    setChoiceValue(langSelect, localStorage.getItem("lang") || "zh");
+    setChoiceValue(themeSelect, localStorage.getItem("theme") || "light");
     cfgCodex.checked = config.enableCodex;
     cfgClaudeCode.checked = config.enableClaudeCode;
     cfgOpenCode.checked = config.enableOpenCode;
@@ -293,6 +331,7 @@ async function setupSettings() {
     cfgAntigravity.checked = config.enableAntigravity;
     setHotkeyValues(config.hotkeys);
     showSettingsStatus();
+    settingsBody.scrollTop = 0;
 
     closeModelPicker();
     clearCardFocus();
@@ -307,12 +346,13 @@ async function setupSettings() {
     modalController.close(panel);
   }
   document.getElementById("settingsClose").addEventListener("click", closeSettings);
+  settingsCancel.addEventListener("click", closeSettings);
   panel.querySelector(".settings-backdrop").addEventListener("click", closeSettings);
 
   // Save
   settingsSave.addEventListener("click", async () => {
-    const lang = langSelect.value;
-    const theme = themeSelect.value;
+    const lang = langSelect.dataset.value;
+    const theme = themeSelect.dataset.value;
 
     const newConfig = {
       enableCodex: cfgCodex.checked,
@@ -372,11 +412,16 @@ const I18N = {
     quotaOverview: "额度概览",
     quotaOverviewHint: "完整视图中点击查看详情；紧凑视图中点击刷新",
     quotaOverviewAria: "额度概览，点击放大",
+    quotaModeAria: "选择额度来源",
+    quotaModeCodex: "显示 Codex 额度",
+    quotaModeAntigravity: "显示 Antigravity 额度",
+    antigravityQuotaOverview: "Antigravity 额度",
+    antigravityQuotaOverviewAria: "Antigravity Gemini 额度，点击放大",
     quotaRingAria: "额度分层圆环",
     resetRowAria: "重置卡，点击查看全部卡片",
     tokenAnalysis: "Token 分析",
     cardExpandAria: (title) => `${title}，点击放大`,
-    resetSub: "可恢复 5 小时与周额度",
+    resetSub: "恢复 5小时与周限额",
     trendTitle: "Token 消耗趋势",
     heatTitle: "每日Token消耗",
     hitRate: "命中率分析",
@@ -402,11 +447,15 @@ const I18N = {
     expandTip: "展开完整视图",
     closeTip: "关闭",
     settingsTitle: "设置",
+    settingsSubtitle: "界面、数据源与快捷键",
+    appearanceSectionTitle: "外观",
+    appearanceSectionHint: "调整界面语言和明暗主题",
     langLabel: "语言 / Language",
     themeLabel: "主题",
     themeLight: "亮色",
     themeDark: "暗色",
     saveBtn: "保存",
+    cancelBtn: "取消",
     settingsClose: "关闭设置",
     allModels: "全部模型",
     sourceAll: "全部",
@@ -415,12 +464,13 @@ const I18N = {
     modelPickerAria: "选择统计模型",
     modelExpanderAria: (source) => `展开或收起 ${source} 模型`,
     sourceSectionTitle: "启用的数据源",
+    sourceSectionHint: "只读取需要汇总的本地来源",
     labelCodex: "OpenAI Codex 额度与日志",
     labelClaudeCode: "Claude Code 本地日志",
     labelOpenCode: "OpenCode 本地会话",
     labelGeminiCli: "Gemini CLI 本地会话",
     labelCline: "Cline 本地日志",
-    labelAntigravity: "Antigravity 会话估算",
+    labelAntigravity: "Antigravity 额度与会话估算",
     hotkeySectionTitle: "快捷键",
     hotkeyHint: "点击输入框后按下组合键；留空可关闭对应快捷键。",
     hotkeyTogglePanel: "显示 / 隐藏主面板",
@@ -486,11 +536,16 @@ const I18N = {
     quotaOverview: "Quota Overview",
     quotaOverviewHint: "Click for details in the full view; click to refresh in compact view",
     quotaOverviewAria: "Quota overview, click to expand",
+    quotaModeAria: "Select quota source",
+    quotaModeCodex: "Show Codex quota",
+    quotaModeAntigravity: "Show Antigravity quota",
+    antigravityQuotaOverview: "Antigravity Quota",
+    antigravityQuotaOverviewAria: "Antigravity Gemini quota, click to expand",
     quotaRingAria: "Layered quota rings",
     resetRowAria: "Reset cards, click to view all",
     tokenAnalysis: "Token Analysis",
     cardExpandAria: (title) => `${title}, click to expand`,
-    resetSub: "Restores 5h & weekly quota",
+    resetSub: "5h + weekly reset",
     trendTitle: "Token Trend",
     heatTitle: "Daily Token Usage",
     hitRate: "Cache Hit Rate",
@@ -516,11 +571,15 @@ const I18N = {
     expandTip: "Expand view",
     closeTip: "Close",
     settingsTitle: "Settings",
+    settingsSubtitle: "Appearance, sources, and shortcuts",
+    appearanceSectionTitle: "Appearance",
+    appearanceSectionHint: "Choose the interface language and color theme",
     langLabel: "Language",
     themeLabel: "Theme",
     themeLight: "Light",
     themeDark: "Dark",
     saveBtn: "Save",
+    cancelBtn: "Cancel",
     settingsClose: "Close settings",
     allModels: "All Models",
     sourceAll: "All",
@@ -529,12 +588,13 @@ const I18N = {
     modelPickerAria: "Select usage model",
     modelExpanderAria: (source) => `Expand or collapse ${source} models`,
     sourceSectionTitle: "Data Sources",
+    sourceSectionHint: "Only read the local sources you want to include",
     labelCodex: "OpenAI Codex Quota & Logs",
     labelClaudeCode: "Claude Code Local Logs",
     labelOpenCode: "OpenCode Local Sessions",
     labelGeminiCli: "Gemini CLI Local Sessions",
     labelCline: "Cline Local Logs",
-    labelAntigravity: "Antigravity Session Estimates",
+    labelAntigravity: "Antigravity Quota & Session Estimates",
     hotkeySectionTitle: "Shortcuts",
     hotkeyHint: "Click an input, then press a key combination. Leave it empty to disable that shortcut.",
     hotkeyTogglePanel: "Show / hide main panel",
@@ -602,6 +662,7 @@ let i18n = I18N.zh;
 // Startup helpers render translated labels, so they must run after i18n exists.
 setupSettings();
 setupModelSelect();
+setupQuotaModeToggle();
 setupExpandableCards();
 setupRingLayers();
 renderBar(elements.shortBar, 0, "gray");
@@ -641,6 +702,9 @@ function applyLang(lang) {
 
     setAttribute("shell", "title", t("shellTitle"));
     setTitleAndAria("refreshButton", "refreshTip");
+    setAttribute("quotaModeToggle", "aria-label", t("quotaModeAria"));
+    setTitleAndAria("quotaModeCodex", "quotaModeCodex");
+    setTitleAndAria("quotaModeAntigravity", "quotaModeAntigravity");
     setTitleAndAria("settingsButton", "settingsTitle");
     setTitleAndAria("closeButton", "closeTip");
     setAttribute("quotaSide", "data-expand-title", t("quotaOverview"));
@@ -675,21 +739,24 @@ function applyLang(lang) {
     setAttribute("trend7Chart", "aria-label", `${t("trend7Label")} Token`);
     set("langLabel", "langLabel");
     set("themeLabel", "themeLabel");
+    set("settingsSubtitle", "settingsSubtitle");
+    set("appearanceSectionTitle", "appearanceSectionTitle");
+    set("appearanceSectionHint", "appearanceSectionHint");
     set("settingsSave", "saveBtn");
+    set("settingsCancel", "cancelBtn");
     set("settingsTitle", "settingsTitle");
     setAttribute("settingsCard", "aria-label", t("settingsTitle"));
     setTitleAndAria("settingsClose", "settingsClose");
     set("shortLabel", "shortLabel");
     set("longLabel", "weekLabel");
     set("tokenValueLabel", "tokenValue");
-    const optLight = document.querySelector("#themeSelect option[value=light]");
-    const optDark = document.querySelector("#themeSelect option[value=dark]");
-    if (optLight) optLight.textContent = t("themeLight");
-    if (optDark) optDark.textContent = t("themeDark");
+    set("themeChoiceLight", "themeLight");
+    set("themeChoiceDark", "themeDark");
     set("resetDialogTitle", "resetCards");
     set("resetDialogSummary", "noResetCredits");
     setTitleAndAria("resetDialogClose", "closeResetCards");
     set("sourceSectionTitle", "sourceSectionTitle");
+    set("sourceSectionHint", "sourceSectionHint");
     set("labelCodex", "labelCodex");
     set("labelClaudeCode", "labelClaudeCode");
     set("labelOpenCode", "labelOpenCode");
@@ -733,7 +800,7 @@ function applyLang(lang) {
   } catch(e) { /* don't crash on i18n */ }
 }
 
-async function refresh() {
+async function refresh({ manual = false } = {}) {
   if (isRefreshing) {
     return;
   }
@@ -744,7 +811,7 @@ async function refresh() {
   elements.refreshButton.setAttribute("aria-label", t("refreshing"));
   elements.appStatus.textContent = t("refreshing");
   try {
-    render(await window.aiQuota.refresh());
+    render(await window.aiQuota.refresh({ manual }));
     elements.appStatus.textContent = t("refreshComplete");
   } catch (error) {
     console.error("Failed to refresh dashboard", error);
@@ -761,7 +828,7 @@ async function refresh() {
 function applyConfigEffects(config) {
   if (!config) return;
   const btn = elements.compactButton || document.getElementById("compactButton");
-  if (!config.enableCodex) {
+  if (!config.enableCodex && !config.enableAntigravity) {
     if (btn) btn.style.display = "none";
     if (isCompact) {
       setCompact(false);
@@ -769,6 +836,34 @@ function applyConfigEffects(config) {
   } else {
     if (btn) btn.style.display = "";
   }
+  elements.quotaModeToggle.hidden = !(config.enableCodex && config.enableAntigravity);
+  const availableMode = !config.enableCodex && config.enableAntigravity
+    ? "antigravity"
+    : config.enableCodex ? quotaMode : "codex";
+  setQuotaMode(availableMode, { persist: false, render: false });
+}
+
+function setupQuotaModeToggle() {
+  elements.quotaModeToggle.querySelectorAll(".quota-mode-button").forEach((button) => {
+    button.addEventListener("click", () => setQuotaMode(button.dataset.mode));
+  });
+  setQuotaMode(quotaMode, { persist: false, render: false });
+}
+
+function setQuotaMode(mode, { persist = true, render = true } = {}) {
+  const config = lastSnapshot?.config;
+  let next = mode === "antigravity" ? "antigravity" : "codex";
+  if (next === "antigravity" && config && !config.enableAntigravity) next = "codex";
+  if (next === "codex" && config && !config.enableCodex && config.enableAntigravity) next = "antigravity";
+  quotaMode = next;
+  if (persist) localStorage.setItem("quotaMode", quotaMode);
+  elements.quotaModeToggle.classList.toggle("antigravity", quotaMode === "antigravity");
+  for (const button of [elements.quotaModeCodex, elements.quotaModeAntigravity]) {
+    const active = button.dataset.mode === quotaMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  }
+  if (render && lastSnapshot) renderQuotaContext(lastSnapshot);
 }
 
 async function setCompact(compact) {
@@ -803,28 +898,21 @@ function render(snapshot) {
     lastSnapshot = snapshot;
     if (snapshot?.config) {
       applyConfigEffects(snapshot.config);
-      document.body.classList.toggle("no-codex", !snapshot.config.enableCodex);
+      document.body.classList.toggle("no-codex", !snapshot.config.enableCodex && !snapshot.config.enableAntigravity);
     }
     const quota = snapshot?.quota;
     elements.updatedAt.textContent = snapshot?.error ? t("refreshFailed") : formatTime(snapshot?.updatedAt ?? Date.now());
     elements.updatedAt.classList.toggle("error", Boolean(snapshot?.error));
     elements.updatedAt.title = snapshot?.error ?? "";
 
-    const windows = getDisplayWindows(quota);
-    renderWindow(
-      "short",
-      windows.shortWindow,
-      t("shortLabel"),
-      Boolean(quota),
-      { unlimitedWhenMissing: Boolean(quota?.longWindow && !quota?.shortWindow) }
-    );
-    renderWindow("long", windows.longWindow, t("weekLabel"), Boolean(quota));
-    renderRing(windows, Boolean(quota));
-    renderResetCredits(snapshot?.resetCredits, quota?.resetCard);
-
     mergedModels = buildMergedModels(snapshot);
+    selectableModelSources = new Set(mergedModels.map((model) => model.source).filter(Boolean));
+    if (snapshot?.config?.enableAntigravity && (snapshot?.antigravityQuota || snapshot?.antigravityTokenUsage)) {
+      selectableModelSources.add("antigravity");
+    }
     const tokenData = getTokenForModel(snapshot, selectedModel);
     renderTokenStats(tokenData, mergedModels, ++tokenRenderGeneration);
+    renderQuotaContext(snapshot);
 
     if (!snapshot?.stale) recordHistory(quota);
     scheduleHistoryRender();
@@ -952,12 +1040,13 @@ function setupModelSelect() {
 function syncModelSelect(modelUsage) {
   const models = Array.isArray(modelUsage) ? modelUsage : [];
   const modelKeys = models.map((m) => m.sourceModel || m.model);
-  const sourceKeys = [...new Set(models.map((m) => m.source).filter(Boolean))];
+  const sourceKeys = [...selectableModelSources];
   const allowed = new Set(["all", ...modelKeys, ...sourceKeys.map((source) => `source:${source}`)]);
   if (!allowed.has(selectedModel)) selectedModel = "all";
   const nextSignature = JSON.stringify([
     currentLocale(),
     selectedModel,
+    sourceKeys,
     models.map((item) => [item.source, item.sourceModel || item.model, item.model])
   ]);
   if (nextSignature === modelMenuSignature) return;
@@ -968,7 +1057,7 @@ function syncModelSelect(modelUsage) {
   elements.modelPickerMenu.append(allOption);
   for (const source of MODEL_SOURCES) {
     const sourceModels = models.filter((item) => item.source === source.key);
-    if (!sourceModels.length) continue;
+    if (!selectableModelSources.has(source.key)) continue;
     const group = document.createElement("div");
     group.className = "model-picker-group";
     group.setAttribute("role", "group");
@@ -980,38 +1069,42 @@ function syncModelSelect(modelUsage) {
       source: source.key,
       kind: "source"
     });
-    const expander = document.createElement("button");
-    expander.type = "button";
-    expander.className = "model-picker-expander";
-    expander.tabIndex = -1;
-    expander.setAttribute("aria-label", t("modelExpanderAria", source.label));
-    const modelList = document.createElement("div");
-    modelList.className = "model-picker-models";
-    const updateExpandedState = () => {
-      const expanded = expandedModelSources.has(source.key);
-      modelList.hidden = !expanded;
-      expander.setAttribute("aria-expanded", String(expanded));
-      expander.textContent = expanded ? "▾" : "▸";
-    };
-    expander.addEventListener("click", (event) => {
-      event.stopPropagation();
-      expandedModelSources.has(source.key)
-        ? expandedModelSources.delete(source.key)
-        : expandedModelSources.add(source.key);
-      updateExpandedState();
-    });
-    sourceRow.append(sourceOption, expander);
+    sourceRow.append(sourceOption);
     group.append(sourceRow);
-    for (const item of sourceModels) {
-      modelList.append(buildModelOption({
-        model: item.sourceModel || item.model,
-        label: item.model === "unknown" ? t("unknownModel") : item.model,
-        source: source.key,
-        kind: "model"
-      }));
+    if (sourceModels.length) {
+      const expander = document.createElement("button");
+      expander.type = "button";
+      expander.className = "model-picker-expander";
+      expander.tabIndex = -1;
+      expander.setAttribute("aria-label", t("modelExpanderAria", source.label));
+      const modelList = document.createElement("div");
+      modelList.className = "model-picker-models";
+      const updateExpandedState = () => {
+        const expanded = expandedModelSources.has(source.key);
+        modelList.hidden = !expanded;
+        expander.setAttribute("aria-expanded", String(expanded));
+        expander.textContent = expanded ? "▾" : "▸";
+      };
+      expander.addEventListener("click", (event) => {
+        event.stopPropagation();
+        expandedModelSources.has(source.key)
+          ? expandedModelSources.delete(source.key)
+          : expandedModelSources.add(source.key);
+        updateExpandedState();
+      });
+      sourceRow.append(expander);
+      for (const item of sourceModels) {
+        modelList.append(buildModelOption({
+          model: item.sourceModel || item.model,
+          label: item.model === "unknown" ? t("unknownModel") : item.model,
+          source: source.key,
+          kind: "model",
+          total: item.total
+        }));
+      }
+      group.append(modelList);
+      updateExpandedState();
     }
-    group.append(modelList);
-    updateExpandedState();
     elements.modelPickerMenu.append(group);
   }
   const parsed = parseModelSelection(selectedModel);
@@ -1034,7 +1127,7 @@ function updateModelPickerWidth(models) {
     ...models.map((item) => item.model === "unknown" ? t("unknownModel") : item.model)
   ];
   const longest = Math.max(...labels.map((label) => context.measureText(label).width), 0);
-  const width = Math.min(420, Math.max(205, Math.ceil(longest + 58)));
+  const width = Math.min(250, Math.max(205, Math.ceil(longest + 102)));
   elements.modelPicker.style.width = `${width}px`;
 }
 
@@ -1048,7 +1141,17 @@ function buildModelOption(item) {
   option.setAttribute("aria-selected", String(item.model === selectedModel));
   option.classList.toggle("selected", item.model === selectedModel);
   option.tabIndex = -1;
-  option.textContent = item.label || item.model;
+  const label = document.createElement("span");
+  label.className = "model-picker-option-label";
+  label.textContent = item.label || item.model;
+  option.append(label);
+  if (item.kind === "model" && Number.isFinite(item.total)) {
+    const usage = document.createElement("small");
+    usage.className = "model-picker-usage";
+    usage.textContent = formatToken(item.total);
+    option.append(usage);
+    option.title = `${label.textContent} · ${usage.textContent} Token`;
+  }
   if (item.source) option.dataset.source = item.source;
   option.addEventListener("click", () => {
     selectedModel = item.model;
@@ -1194,12 +1297,57 @@ function renderResetCredits(resetCredits, resetCard) {
   if (Array.isArray(resetCredits?.credits)) {
     latestResetCredits = [...resetCredits.credits].sort(compareResetExpiry);
   }
+  const normalizedCardCount = normalizeResetCount(resetCard?.count);
+  const hasResetCard = Boolean(resetCard && (resetCard.unlimited || normalizedCardCount != null));
+  const normalizedCreditCount = normalizeResetCount(resetCredits?.availableCount);
+  const hasResetCredits = Boolean(resetCredits && (
+    Array.isArray(resetCredits.credits) || normalizedCreditCount != null
+  ));
+  const hasResetData = hasResetCard || hasResetCredits;
+  elements.resetRow.hidden = !hasResetData;
+  if (!hasResetData) {
+    if (modalController.isOpen(elements.resetDialog)) closeResetDialog();
+    return;
+  }
   const availableCredits = latestResetCredits.filter((credit) => credit.status === "available");
-  const availableCount = resetCredits?.availableCount ?? resetCard?.count ?? availableCredits.length;
+  const reportedCount = normalizedCreditCount ?? normalizedCardCount;
+  const availableCount = reportedCount ?? availableCredits.length;
   const nearest = (availableCredits.length ? availableCredits : latestResetCredits)[0];
   const expiresAt = nearest?.expiresAt ?? resetCard?.expiresAt;
-  elements.resetCount.textContent = availableCount == null ? "--" : t("resetCount", availableCount);
+  elements.resetCount.textContent = t("resetCount", availableCount);
   elements.resetExpiry.textContent = expiresAt ? formatDateTime(expiresAt) : t("expireUnknown");
+}
+
+function renderQuotaContext(snapshot) {
+  const antigravityMode = quotaMode === "antigravity";
+  const quota = antigravityMode ? snapshot?.antigravityQuota : snapshot?.quota;
+  const title = antigravityMode ? t("antigravityQuotaOverview") : t("quotaOverview");
+  const aria = antigravityMode ? t("antigravityQuotaOverviewAria") : t("quotaOverviewAria");
+  elements.quotaSide.dataset.expandTitle = title;
+  elements.quotaSide.setAttribute("aria-label", aria);
+
+  const windows = getDisplayWindows(quota);
+  renderWindow(
+    "short",
+    windows.shortWindow,
+    t("shortLabel"),
+    Boolean(quota),
+    { unlimitedWhenMissing: !antigravityMode && Boolean(quota?.longWindow && !quota?.shortWindow) }
+  );
+  renderWindow("long", windows.longWindow, t("weekLabel"), Boolean(quota));
+  renderRing(windows, Boolean(quota));
+
+  if (antigravityMode) {
+    elements.resetRow.hidden = true;
+    if (modalController.isOpen(elements.resetDialog)) closeResetDialog();
+  } else {
+    renderResetCredits(snapshot?.resetCredits, quota?.resetCard);
+  }
+}
+
+function normalizeResetCount(value) {
+  const number = typeof value === "string" && value.trim() ? Number(value) : value;
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
 
 function openResetDialog() {
@@ -1361,7 +1509,8 @@ function renderTokenValue(stats, hasTokenData) {
     return;
   }
 
-  elements.tokenValue.textContent = `≈ ${window.TokenPricing.formatUsd(estimate.usd)}${estimate.complete ? "" : "+"}`;
+  const formattedValue = window.TokenPricing.formatUsd(estimate.usd);
+  elements.tokenValue.textContent = `≈ ${formattedValue}${estimate.complete ? "" : "+"}`;
   elements.tokenValueBox.classList.remove("unavailable");
   elements.tokenValueBox.title = estimate.complete
     ? t("tokenValueHint")
@@ -1743,7 +1892,7 @@ function activateWithKeyboard(event) {
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
   if (isCompact && event.currentTarget === elements.quotaSide) {
-    refresh();
+    refresh({ manual: true });
     return;
   }
   toggleCardFocus(event.currentTarget.closest(".interactive-card"));
@@ -1760,7 +1909,7 @@ function setupExpandableCards() {
       }
       if (isCompact && card === elements.quotaSide) {
         event.stopPropagation();
-        refresh();
+        refresh({ manual: true });
         return;
       }
       if (event.target.closest("button, input, select, a, [role=button], .reset-row, .detail-target, .chart-shell, .hit-heatmap")) return;

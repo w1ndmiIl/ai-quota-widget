@@ -96,17 +96,34 @@ function getNamespace(cache, namespace) {
   return state;
 }
 
-function sweepDeletedFiles(state) {
+function sweepDeletedFiles(state, retainDeleted) {
+  let dirty = false;
   for (const cachedFile of Object.keys(state.files)) {
-    if (!fs.existsSync(cachedFile)) {
+    const cachedItem = state.files[cachedFile];
+    if (fs.existsSync(cachedFile)) {
+      if (cachedItem.deletedAt) {
+        delete cachedItem.deletedAt;
+        dirty = true;
+      }
+    } else if (retainDeleted) {
+      if (!cachedItem.deletedAt) {
+        cachedItem.deletedAt = Date.now();
+        dirty = true;
+      }
+    } else {
       delete state.files[cachedFile];
+      dirty = true;
     }
   }
   state.lastSweepAt = Date.now();
-  return true;
+  return dirty;
 }
 
-function scanFilesIncrementally(filePaths, parseFile, { namespace = "default" } = {}) {
+function scanFilesIncrementally(filePaths, parseFile, {
+  namespace = "default",
+  retainDeleted = false,
+  retainLastValid = retainDeleted
+} = {}) {
   const cache = loadCache();
   const state = getNamespace(cache, namespace);
   let dirty = false;
@@ -122,6 +139,10 @@ function scanFilesIncrementally(filePaths, parseFile, { namespace = "default" } 
     const { mtimeMs, size } = stat;
     const cachedItem = state.files[filePath];
     if (cachedItem && cachedItem.mtimeMs === mtimeMs && cachedItem.size === size) {
+      if (cachedItem.deletedAt) {
+        delete cachedItem.deletedAt;
+        dirty = true;
+      }
       continue;
     }
 
@@ -131,7 +152,7 @@ function scanFilesIncrementally(filePaths, parseFile, { namespace = "default" } 
     } catch (error) {
       console.error(`Failed to parse file: ${filePath}`, error);
       // A changed file must never silently fall back to an older parsed result.
-      if (cachedItem) {
+      if (cachedItem && !retainLastValid) {
         delete state.files[filePath];
         dirty = true;
       }
@@ -140,13 +161,14 @@ function scanFilesIncrementally(filePaths, parseFile, { namespace = "default" } 
 
   const now = Date.now();
   if (!filePaths.length || now - (state.lastSweepAt || 0) >= SWEEP_INTERVAL_MS) {
-    dirty = sweepDeletedFiles(state) || dirty;
+    dirty = sweepDeletedFiles(state, retainDeleted) || dirty;
   }
 
   if (dirty) saveCache(cache);
 
   const result = {};
-  for (const filePath of filePaths) {
+  const resultPaths = retainDeleted ? Object.keys(state.files) : filePaths;
+  for (const filePath of resultPaths) {
     const cachedItem = state.files[filePath];
     if (cachedItem) result[filePath] = cachedItem.data;
   }

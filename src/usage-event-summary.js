@@ -1,5 +1,7 @@
 "use strict";
 
+const { addSettledUsageCost } = require("./usage-cost-settlement");
+
 function summarizeUsageEvents(events, {
   now = Date.now(),
   days = 1,
@@ -8,12 +10,14 @@ function summarizeUsageEvents(events, {
   emptyError = "No local session usage found"
 } = {}) {
   const dayMs = 24 * 60 * 60 * 1000;
-  const since = now - days * dayMs;
-  const catalogSince = now - Math.max(days, catalogDays) * dayMs;
+  const since = days == null ? 0 : now - days * dayMs;
+  const catalogSince = catalogDays == null ? 0 : now - Math.max(days, catalogDays) * dayMs;
   const catalogEvents = events.filter((event) => event.t >= catalogSince);
   const currentEvents = catalogEvents.filter((event) => event.t >= since);
   const modelUsage = summarizeModels(currentEvents, source);
-  const modelCatalog = catalogDays > days ? summarizeModels(catalogEvents, source) : modelUsage;
+  const modelCatalog = days == null || catalogDays == null || catalogDays > days
+    ? summarizeModels(catalogEvents, source)
+    : modelUsage;
 
   if (!currentEvents.length) {
     return {
@@ -83,7 +87,9 @@ function summarizeModels(events, source) {
   for (const event of events) {
     const model = event.model || "unknown";
     if (!models.has(model)) models.set(model, { model, source, ...emptyTotals() });
-    addUsage(models.get(model), event);
+    const bucket = models.get(model);
+    addUsage(bucket, event);
+    addSettledUsageCost(bucket, { ...event, source: event.source || source }, model);
   }
   return [...models.values()].sort((a, b) => b.total - a.total || a.model.localeCompare(b.model));
 }

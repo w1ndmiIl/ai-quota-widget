@@ -99,6 +99,49 @@ test("incremental scanning system", async (t) => {
     const cache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
     assert.deepStrictEqual(cache.namespaces.deleted.files, {});
   });
+
+  await t.test("retains settled data after source files are deleted", () => {
+    const testFile = path.join(tmpDir, "durable.jsonl");
+    fs.writeFileSync(testFile, "settled", "utf8");
+    const options = { namespace: "durable", retainDeleted: true };
+    scanFilesIncrementally([testFile], () => ({ total: 42 }), options);
+    fs.unlinkSync(testFile);
+
+    assert.deepStrictEqual(scanFilesIncrementally([], () => {}, options), {
+      [testFile]: { total: 42 }
+    });
+    const cache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    assert.equal(cache.namespaces.durable.files[testFile].data.total, 42);
+    assert.ok(cache.namespaces.durable.files[testFile].deletedAt > 0);
+  });
+
+  await t.test("replaces rather than double-counts a changed durable file", () => {
+    const testFile = path.join(tmpDir, "durable-update.jsonl");
+    const options = { namespace: "durable-update", retainDeleted: true };
+    fs.writeFileSync(testFile, "first", "utf8");
+    scanFilesIncrementally([testFile], () => ({ total: 10 }), options);
+    fs.writeFileSync(testFile, "second-version", "utf8");
+    assert.deepStrictEqual(scanFilesIncrementally([testFile], () => ({ total: 25 }), options), {
+      [testFile]: { total: 25 }
+    });
+  });
+
+  await t.test("keeps the last settled result while a durable file is temporarily invalid", () => {
+    const testFile = path.join(tmpDir, "durable-invalid.jsonl");
+    const options = { namespace: "durable-invalid", retainDeleted: true };
+    fs.writeFileSync(testFile, "valid", "utf8");
+    scanFilesIncrementally([testFile], () => ({ total: 18 }), options);
+    fs.writeFileSync(testFile, "partial", "utf8");
+    const error = console.error;
+    console.error = () => {};
+    try {
+      assert.deepStrictEqual(scanFilesIncrementally([testFile], () => {
+        throw new Error("partial write");
+      }, options), { [testFile]: { total: 18 } });
+    } finally {
+      console.error = error;
+    }
+  });
 });
 
 test("uses the application user-data directory when supplied", (t) => {

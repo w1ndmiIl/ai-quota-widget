@@ -21,7 +21,14 @@ const {
   readHourlyTokenHistory
 } = require("../src/token-usage-service");
 const { CodexService } = require("../src/codex-service");
-const { extractModel } = require("../src/antigravity-token-service");
+const {
+  extractModel,
+  isGeminiModel,
+  readLocalTokenUsage: readAntigravityTokenUsage
+} = require("../src/antigravity-token-service");
+
+test.beforeEach(() => fs.rmSync(testCachePath, { force: true }));
+test.after(() => fs.rmSync(testCachePath, { force: true }));
 
 test("keeps the server-reported remaining quota before a future reset", async () => {
   const service = new CodexService();
@@ -194,16 +201,28 @@ test("keeps token usage errors visible without breaking quota", () => {
   assert.equal(snapshot.tokenStats.error, "codex account authentication required to read token usage");
 });
 
-test("normalizes reset card hints from rate-limit payload credits", () => {
+test("does not treat account credit balances as reset-card counts", () => {
   const snapshot = normalizeCodexQuota({
     rateLimits: {
       primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: 1800000000 },
       credits: {
         hasCredits: true,
         unlimited: false,
-        balance: "2",
+        balance: "1999.0860232500",
         expires_at: "2026-08-01T00:00:00Z"
       }
+    }
+  });
+
+  assert.equal(snapshot.resetCard, null);
+});
+
+test("normalizes explicit reset-card count fields", () => {
+  const snapshot = normalizeCodexQuota({
+    rateLimits: {
+      primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: 1800000000 },
+      resetCount: "2",
+      resetCardExpiresAt: "2026-08-01T00:00:00Z"
     }
   });
 
@@ -236,6 +255,15 @@ test("normalizes and sorts wham reset credits response by expiry", () => {
   assert.equal(snapshot.credits[0].status, "available");
   assert.equal(snapshot.credits[1].grantedAt, Date.parse("2026-07-01T20:05:28Z"));
   assert.equal(snapshot.credits[1].expiresAt, Date.parse("2026-07-31T20:05:28Z"));
+});
+
+test("falls back to the real available-card list when a reset count is malformed", () => {
+  const snapshot = normalizeResetCredits({
+    available_count: "1999.0860232500",
+    credits: [{ status: "available", title: "Full reset" }]
+  });
+
+  assert.equal(snapshot.availableCount, 1);
 });
 
 test("reads local Codex session token usage", (t) => {
@@ -367,7 +395,7 @@ test("groups local token usage by the model active when each event was recorded"
   assert.equal(hourly.reduce((sum, bucket) => sum + bucket.total, 0), 80);
 });
 
-test("builds current usage and the longer model catalog from one read", (t) => {
+test("builds current usage and the complete model catalog from one read", (t) => {
   const fs = require("node:fs");
   const os = require("node:os");
   const path = require("node:path");
@@ -384,7 +412,7 @@ test("builds current usage and the longer model catalog from one read", (t) => {
   ];
   fs.writeFileSync(path.join(dir, "rollout.jsonl"), rows.map(JSON.stringify).join("\n"));
 
-  const usage = readLocalTokenUsage({ now: now + 60_000, days: 1, catalogDays: 45, root: dir });
+  const usage = readLocalTokenUsage({ now: now + 60_000, days: 1, catalogDays: null, root: dir });
   assert.deepEqual(usage.modelUsage.map(({ model, total }) => ({ model, total })), [
     { model: "current-model", total: 120 }
   ]);
@@ -426,6 +454,35 @@ test("keeps Codex and Claude model usage in separate source groups", (t) => {
   assert.equal(Object.values(claudeHistory.daily)[0].total, 80);
 });
 
+test("keeps settled Claude usage after Claude removes the transcript", (t) => {
+  const { readLocalTokenUsage } = require("../src/token-usage-service");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bar-claude-ledger-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const projects = path.join(dir, ".claude", "projects");
+  const project = path.join(projects, "project-1");
+  fs.mkdirSync(project, { recursive: true });
+  const transcript = path.join(project, "session-1.jsonl");
+  const now = Date.parse("2026-08-20T12:00:00Z");
+  fs.writeFileSync(transcript, JSON.stringify({
+    timestamp: new Date(now).toISOString(),
+    message: {
+      id: "message-1",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 100, output_tokens: 25 }
+    }
+  }), "utf8");
+
+  const options = { now: now + 1_000, days: 1, catalogDays: null, root: [projects], sources: ["claude"] };
+  const first = readLocalTokenUsage(options);
+  assert.equal(first.total, 125);
+  assert.equal(first.modelCatalog[0].model, "claude-sonnet-4-6");
+  fs.rmSync(transcript, { force: true });
+
+  const retained = readLocalTokenUsage(options);
+  assert.equal(retained.total, 125);
+  assert.equal(retained.modelCatalog[0].source, "claude");
+});
+
 test("formats duration labels", () => {
   assert.equal(labelForDuration(45, "fallback"), "45分钟");
   assert.equal(labelForDuration(90, "fallback"), "1.5小时");
@@ -461,6 +518,76 @@ test("only extracts Antigravity models from explicit settings changes", () => {
     }),
     "Gemini 3.5 Flash (High)"
   );
+  assert.equal(
+    extractModel({
+      type: "USER_INPUT",
+      content: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Gemini 3.5 Flash (High) to Claude Opus 4.6 (Thinking)."
+    }),
+    "Claude Opus 4.6 (Thinking)"
+  );
+  assert.equal(isGeminiModel("Gemini 3.5 Flash (High)"), true);
+  assert.equal(isGeminiModel("google/gemini-2.5-pro"), true);
+  assert.equal(isGeminiModel("Claude Opus 4.6 (Thinking)"), false);
+});
+
+test("counts only Gemini models from Antigravity sessions", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bar-antigravity-gemini-only-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const logs = path.join(dir, "brain-1", ".system_generated", "logs");
+  fs.mkdirSync(logs, { recursive: true });
+  const now = Date.parse("2026-08-20T12:00:00Z");
+  const modelChange = (from, to, offset) => ({
+    type: "USER_INPUT",
+    created_at: new Date(now + offset).toISOString(),
+    content: `<USER_SETTINGS_CHANGE>\nThe user changed setting \`Model Selection\` from ${from} to ${to}.`
+  });
+  const response = (content, offset) => ({
+    type: "PLANNER_RESPONSE",
+    created_at: new Date(now + offset).toISOString(),
+    content
+  });
+  fs.writeFileSync(path.join(logs, "transcript.jsonl"), [
+    modelChange("None", "Gemini 3.5 Flash (High)", 0),
+    response("gemini response", 1),
+    modelChange("Gemini 3.5 Flash (High)", "Claude Opus 4.6 (Thinking)", 2),
+    response("external response", 3)
+  ].map(JSON.stringify).join("\n"), "utf8");
+
+  const usage = readAntigravityTokenUsage({ now: now + 1_000, days: 1, catalogDays: null, root: [dir] });
+  assert.deepEqual(usage.modelUsage.map((item) => item.model), ["Gemini 3.5 Flash (High)"]);
+  assert.equal(usage.sessions, 1);
+});
+
+test("keeps settled Antigravity usage after its session directory is removed", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bar-antigravity-ledger-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const session = path.join(dir, "brain-1");
+  const logs = path.join(session, ".system_generated", "logs");
+  fs.mkdirSync(logs, { recursive: true });
+  const transcript = path.join(logs, "transcript.jsonl");
+  const now = Date.parse("2026-08-20T12:00:00Z");
+  fs.writeFileSync(transcript, [
+    JSON.stringify({
+      type: "USER_INPUT",
+      created_at: new Date(now).toISOString(),
+      content: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.5 Flash (High)."
+    }),
+    JSON.stringify({
+      type: "PLANNER_RESPONSE",
+      created_at: new Date(now + 1).toISOString(),
+      content: "done"
+    })
+  ].join("\n"), "utf8");
+
+  const options = { now: now + 1_000, days: 1, catalogDays: null, root: [dir] };
+  const first = readAntigravityTokenUsage(options);
+  assert.ok(first.total > 0);
+  assert.equal(first.modelCatalog[0].model, "Gemini 3.5 Flash (High)");
+  fs.rmSync(session, { recursive: true, force: true });
+
+  const retained = readAntigravityTokenUsage(options);
+  assert.equal(retained.total, first.total);
+  assert.equal(retained.modelCatalog[0].model, "Gemini 3.5 Flash (High)");
 });
 
 test("reads Claude Code projects session log with message.model, message.usage and deduplicates", (t) => {
@@ -520,9 +647,12 @@ test("reads Claude Code projects session log with message.model, message.usage a
   assert.equal(usage.cacheWrite, 100);
   assert.equal(usage.output, 50);
   assert.equal(usage.total, 950);
-  assert.deepEqual(usage.modelUsage, [
+  assert.deepEqual(usage.modelUsage.map(({ model, input, cached, cacheWrite, output, reasoning, total }) => ({
+    model, input, cached, cacheWrite, output, reasoning, total
+  })), [
     { model: "deepseek-v4-pro", input: 900, cached: 500, cacheWrite: 100, output: 50, reasoning: 0, total: 950 }
   ]);
+  assert.equal(usage.modelUsage[0].pricingSettled, true);
 });
 
 test.after(() => {

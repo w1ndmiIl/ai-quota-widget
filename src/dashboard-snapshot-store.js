@@ -28,7 +28,7 @@ class DashboardSnapshotStore {
   }
 
   save(snapshot) {
-    if (!snapshot || (!snapshot.quota && !snapshot.localTokenUsage && !snapshot.antigravityTokenUsage)) return;
+    if (!snapshot || (!snapshot.quota && !snapshot.antigravityQuota && !snapshot.localTokenUsage && !snapshot.antigravityTokenUsage)) return;
     this.cached = { ...snapshot, config: this.getConfig(), error: null, errors: [] };
     const serialized = JSON.stringify(this.cached);
     this.savePending = this.savePending
