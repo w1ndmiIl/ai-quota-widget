@@ -2,7 +2,7 @@
 
 一个常驻桌面的 Windows 悬浮窗，用于查看 Codex 额度，以及 Codex、Claude Code、OpenCode、Gemini CLI、Cline 和 Antigravity 的本地 Token 用量。界面支持完整的中英文切换。
 
-[English](README_EN.md) · [下载发行版](https://github.com/w1ndwill/ai-quota-widget/releases)
+[English](README_EN.md) · [下载发行版](https://github.com/w1ndmiIl/ai-quota-widget/releases)
 
 ## 界面
 
@@ -74,7 +74,7 @@ Codex 与 Claude 的当前用量、历史和累计视图共用短期事件缓存
 
 ## 使用说明
 
-1. 从 [Releases](https://github.com/w1ndwill/ai-quota-widget/releases) 下载 Windows 安装包。
+1. 从 [Releases](https://github.com/w1ndmiIl/ai-quota-widget/releases) 下载 Windows 安装包。
 2. 如需查看 Codex 官方额度，请先安装并登录 Codex 桌面端。
 3. 启动 AI 额度；程序会自动查找本机 `codex.exe`，无需手动填写路径。
 

@@ -2,7 +2,7 @@
 
 A Windows desktop widget for viewing Codex quota and local token usage from Codex, Claude Code, OpenCode, Gemini CLI, Cline, and Antigravity, with complete Chinese and English interfaces.
 
-[中文](README.md) · [Download](https://github.com/w1ndwill/ai-quota-widget/releases)
+[中文](README.md) · [Download](https://github.com/w1ndmiIl/ai-quota-widget/releases)
 
 ## Screenshots
 
@@ -70,7 +70,7 @@ Default shortcuts:
 
 ## Getting started
 
-1. Download the Windows installer from [Releases](https://github.com/w1ndwill/ai-quota-widget/releases).
+1. Download the Windows installer from [Releases](https://github.com/w1ndmiIl/ai-quota-widget/releases).
 2. To view official Codex quota, install and sign in to the Codex desktop app first.
 3. Start AI Quota Widget. It finds the local `codex.exe` automatically.
 
