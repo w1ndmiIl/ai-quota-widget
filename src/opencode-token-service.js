@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawnSync, execFile } = require("node:child_process");
 const {
   finiteNumber,
   historyFromUsageEvents,
@@ -14,44 +14,62 @@ const {
 const exportCache = new Map();
 let discoveredBinary;
 let exportCacheLoadedPath;
+let refreshPending = null;
+let lastRefreshAt = 0;
+let refreshError = null;
+let pendingSessions = [];
+const progressListeners = new Set();
+const REFRESH_TTL = 15_000;
+const activeCommands = new Set();
+let cancelled = false;
+function killCommand(command) {
+  if (process.platform === "win32" && command.pid) execFile("taskkill.exe", ["/pid", String(command.pid), "/T", "/F"], { windowsHide: true }, () => {});
+  else command.kill();
+}
+function cancelReads() { cancelled = true; for (const command of activeCommands) killCommand(command); }
 
-function readOpenCodeTokenUsage(options = {}) {
+async function readOpenCodeTokenUsage(options = {}) {
   const now = options.now || Date.now();
   const days = Object.hasOwn(options, "days") && options.days == null ? null : options.days || 1;
   const catalogDays = Object.hasOwn(options, "catalogDays") ? options.catalogDays : days;
   const since = days == null || catalogDays == null
     ? 0
     : now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
-  const events = readOpenCodeEvents({
+  const events = await readOpenCodeEvents({
+    ...options,
     since,
     runner: options.runner,
-    binary: options.binary
+    binary: options.binary,
+    onProgress: options.onProgress && ((events) => options.onProgress(summarizeUsageEvents(events, {
+      ...options, now, days, catalogDays, source: "opencode"
+    })))
   });
-  return summarizeUsageEvents(events, {
+  return { ...summarizeUsageEvents(events, {
     ...options,
     now,
     days,
     catalogDays,
     source: "opencode",
     emptyError: "No local OpenCode session usage found"
-  });
+  }), readError: refreshError, partial: pendingSessions.length > 0 };
 }
 
-function readOpenCodeStatsUsage({ days = 1, runner = runOpenCode, binary } = {}) {
+async function readOpenCodeStatsUsage({ days = 1, runner = runOpenCode, binary } = {}) {
   const executable = binary || findOpenCodeBinary();
   if (!executable && runner === runOpenCode) return emptyStatsUsage();
   const args = ["stats"];
   if (days !== null) args.push("--days", String(days));
   args.push("--models");
-  const result = runner(executable, args);
+  const result = await runner(executable, args);
   if (!result?.ok) return emptyStatsUsage();
   return parseStatsOutput(result.stdout);
 }
 
-function readOpenCodeTokenHistory(options = {}) {
+async function readOpenCodeTokenHistory(options = {}) {
   const now = options.now || Date.now();
   const days = options.days || 45;
-  const events = readOpenCodeEvents({
+  const events = await readOpenCodeEvents({
+    ...options,
     since: now - days * 24 * 60 * 60 * 1000,
     runner: options.runner,
     binary: options.binary
@@ -59,29 +77,74 @@ function readOpenCodeTokenHistory(options = {}) {
   return historyFromUsageEvents(events, { ...options, now, days });
 }
 
-function readOpenCodeEvents({ since = 0, runner = runOpenCode, binary } = {}) {
+async function readOpenCodeEvents({ since = 0, runner = runOpenCode, binary, onProgress, refreshTtl = REFRESH_TTL, skipRefresh = false } = {}) {
   loadExportCache();
+  if (skipRefresh) return cachedEvents(since);
+  const notify = () => onProgress?.(cachedEvents(since));
+  notify();
+  if (onProgress) progressListeners.add(notify);
+  try {
+    if (!refreshPending && (pendingSessions.length || Date.now() - lastRefreshAt >= refreshTtl)) {
+      refreshPending = refreshExports(runner, binary).finally(() => {
+        lastRefreshAt = Date.now();
+        refreshPending = null;
+      });
+    }
+    if (refreshPending) await refreshPending;
+    return cachedEvents(since);
+  } finally {
+    progressListeners.delete(notify);
+  }
+}
+
+async function refreshExports(runner, binary) {
+  cancelled = false;
+  refreshError = null;
+  const deadline = Date.now() + 8_000;
   const executable = binary || findOpenCodeBinary();
   const listResult = !executable && runner === runOpenCode
     ? { ok: false, stdout: "" }
-    : runner(executable, ["session", "list", "--format", "json"]);
-  const sessions = (listResult?.ok ? parseSessionList(listResult.stdout) : [])
-    .filter((session) => numericTimestamp(session.updated, 0) >= since)
-    .sort((a, b) => numericTimestamp(a.updated, 0) - numericTimestamp(b.updated, 0));
+    : await runner(executable, ["session", "list", "--format", "json"]);
+  if (!listResult?.ok) { refreshError = listResult?.stderr || "OpenCode CLI unavailable"; return; }
+  let listed;
+  try { listed = parseSessionList(listResult.stdout).sort((a,b) => numericTimestamp(b.updated,0)-numericTimestamp(a.updated,0)); }
+  catch (error) { refreshError = error.message; return; }
+  const listedById = new Map(listed.map((session) => [session.id, session]));
+  const sessions = [...pendingSessions.map((session) => listedById.get(session.id) || session), ...listed.filter((session) => !pendingSessions.some((pending) => pending.id === session.id))];
   let cacheChanged = false;
-  for (const session of sessions) {
+  let batchCount = 0;
+  let batchStartedAt = Date.now();
+  pendingSessions = [];
+  for (let index = 0; index < sessions.length; index++) {
+    const session = sessions[index];
+    if (cancelled || Date.now() >= deadline || batchCount >= 20) { pendingSessions = sessions.slice(index); break; }
     const updated = numericTimestamp(session.updated, 0);
     const cacheKey = session.id;
     let cached = exportCache.get(cacheKey);
     if (!cached || cached.updated !== updated) {
-      const exported = runner(executable, ["export", session.id, "--sanitize"]);
-      if (!exported?.ok) continue;
-      cached = { updated, events: parseSessionExport(exported.stdout, session) };
+      const exported = await runner(executable, ["export", session.id, "--sanitize"], { timeoutMs: Math.max(1, Math.min(5000, deadline-Date.now())) });
+      batchCount += 1;
+      if (!exported?.ok) { refreshError = exported?.stderr || "OpenCode export failed"; continue; }
+      let events;
+      try { events = parseSessionExport(exported.stdout, session); }
+      catch (error) { refreshError = error.message; continue; }
+      cached = { updated, events };
       exportCache.set(cacheKey, cached);
       cacheChanged = true;
+      // Bound each batch, publish settled data, then let other worker requests run.
+      if (batchCount >= 20 || Date.now() - batchStartedAt >= 2_000) {
+        saveExportCache();
+        cacheChanged = false;
+        for (const notify of progressListeners) notify();
+        await new Promise((resolve) => setImmediate(resolve));
+        batchStartedAt = Date.now();
+      }
     }
   }
   if (cacheChanged) saveExportCache();
+}
+
+function cachedEvents(since) {
   const events = [];
   const seen = new Set();
   for (const cached of exportCache.values()) {
@@ -110,6 +173,8 @@ function loadExportCache() {
   const cachePath = openCodeCachePath();
   if (exportCacheLoadedPath === cachePath) return;
   exportCache.clear();
+  lastRefreshAt = 0;
+  pendingSessions = [];
   exportCacheLoadedPath = cachePath;
   if (!cachePath) return;
   try {
@@ -141,6 +206,7 @@ function openCodeCachePath() {
 
 function parseSessionList(stdout) {
   const value = parseJsonOutput(stdout, "[", "]");
+  if (!Array.isArray(value)) throw new Error("Invalid OpenCode session list");
   return Array.isArray(value)
     ? value.filter((session) => typeof session?.id === "string" && session.id.trim())
     : [];
@@ -148,7 +214,7 @@ function parseSessionList(stdout) {
 
 function parseSessionExport(stdout, session = {}) {
   const value = parseJsonOutput(stdout, "{", "}");
-  if (!value || !Array.isArray(value.messages)) return [];
+  if (!value || !Array.isArray(value.messages)) throw new Error("Invalid OpenCode session export");
   const events = [];
   const seen = new Set();
   for (const message of value.messages) {
@@ -296,28 +362,33 @@ function parseJsonOutput(stdout, open, close) {
   }
 }
 
-function runOpenCode(binary, args) {
+async function runOpenCode(binary, args, { timeoutMs = 5000 } = {}) {
   if (!binary) return { ok: false, stdout: "", stderr: "OpenCode CLI not found" };
   const options = {
     cwd: os.homedir(),
     encoding: "utf8",
     windowsHide: true,
-    timeout: 30_000,
     maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, NO_COLOR: "1", CI: "1" }
   };
-  let result;
+  let executable = binary;
+  let commandArgs = args;
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(binary)) {
     const command = [binary, ...args].map(quoteCmdArgument).join(" ");
-    result = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", command], options);
-  } else {
-    result = spawnSync(binary, args, options);
+    executable = process.env.ComSpec || "cmd.exe";
+    commandArgs = ["/d", "/s", "/c", command];
   }
-  return {
-    ok: !result.error && result.status === 0,
-    stdout: result.stdout || "",
-    stderr: result.stderr || result.error?.message || ""
-  };
+  return new Promise((resolve) => {
+    let timer;
+    let timedOut = false;
+    const command = execFile(executable, commandArgs, options, (error, stdout, stderr) => {
+      clearTimeout(timer);
+      activeCommands.delete(command);
+      resolve({ ok: !error && !timedOut, stdout: stdout || "", stderr: timedOut ? "OpenCode command timed out" : stderr || error?.message || "" });
+    });
+    activeCommands.add(command);
+    timer = setTimeout(() => { timedOut = true; killCommand(command); }, timeoutMs);
+  });
 }
 
 function findOpenCodeBinary() {
@@ -355,6 +426,8 @@ function textValue(value) {
 }
 
 module.exports = {
+  cancelReads,
+  invalidateCache: () => { lastRefreshAt = 0; },
   findOpenCodeBinary,
   parseSessionExport,
   parseSessionList,

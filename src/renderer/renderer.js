@@ -84,9 +84,12 @@ let isCompact = localStorage.getItem("compact") === "1";
 let tokenRange = localStorage.getItem("tokenRange") || "24h";
 let quotaMode = localStorage.getItem("quotaMode") === "antigravity" ? "antigravity" : "codex";
 let isRefreshing = false;
+let queuedRefresh = null;
 let focusedCard = null;
 let lastSnapshot = null;
-let selectedModel = "all";
+let dashboardControls = null;
+let currentReport = null;
+let selectedModel = localStorage.getItem("selectedModel") || "all";
 let tokenRenderGeneration = 0;
 const chartSeries = new Map();
 const HISTORY_VERSION = "2";
@@ -166,7 +169,12 @@ setInterval(() => {
   if (!document.hidden) refresh();
 }, 5 * 60_000);
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) return;
+  if (document.hidden) {
+    cancelHistoryRender();
+    ++tokenRenderGeneration;
+    return;
+  }
+  if (lastSnapshot && !isCompact) render(lastSnapshot);
   if (!lastSnapshot?.updatedAt || Date.now() - lastSnapshot.updatedAt > 60_000) refresh();
   scheduleHistoryRender(true);
 });
@@ -181,7 +189,7 @@ async function loadInitialData() {
     await refresh();
   } finally {
     initialDataReady = true;
-    if (tokenRange === "cumulative" && lastSnapshot) {
+    if (!isCompact && tokenRange === "cumulative" && lastSnapshot) {
       const tokenData = getTokenForModel(lastSnapshot, selectedModel);
       await renderTokenStats(tokenData, mergedModels, ++tokenRenderGeneration);
     }
@@ -254,7 +262,7 @@ async function setupSettings() {
   bindChoiceGroup(themeSelect);
 
   applyConfigEffects(config);
-  document.body.classList.toggle("no-codex", !config.enableCodex);
+  document.body.classList.toggle("no-codex", !config.enableCodex && !config.enableAntigravity);
 
   setChoiceValue(langSelect, localStorage.getItem("lang") || "zh");
   setChoiceValue(themeSelect, localStorage.getItem("theme") || "light");
@@ -387,7 +395,7 @@ async function setupSettings() {
       applyLang(lang);
       setHotkeyValues(config.hotkeys);
       applyConfigEffects(config);
-      document.body.classList.toggle("no-codex", !config.enableCodex);
+      document.body.classList.toggle("no-codex", !config.enableCodex && !config.enableAntigravity);
     } catch (e) {
       console.error(e);
       showSettingsStatus(t("hotkeySaveFailed"), "fail");
@@ -435,17 +443,20 @@ const I18N = {
     tokenCache: "缓存",
     tokenOutput: "输出",
     tokenValue: "API 估值",
+    customTokenValue: "API 估值（自定义）",
+    customTokenValueHint: "按你填写的自定义单价估算，不代表订阅账单。",
     tokenValueHint: "按标准文本 API 公开价格估算；不含长上下文、区域、工具调用及缓存存储附加费，不代表订阅实际账单。",
     tokenValuePartial: (models) => `仅包含已识别模型；未计价：${models}`,
     tokenValueUnavailable: "当前模型没有可用的公开 API 单价。",
     refreshTip: "手动刷新",
     refreshing: "正在刷新数据",
     refreshComplete: "数据已更新",
+    resetIn: (value) => `${value} 后重置`,
     pinTip: "置顶",
     unpinTip: "取消置顶",
     compactTip: "切换紧凑视图",
     expandTip: "展开完整视图",
-    closeTip: "关闭",
+    closeTip: "隐藏到托盘",
     settingsTitle: "设置",
     settingsSubtitle: "界面、数据源与快捷键",
     appearanceSectionTitle: "外观",
@@ -559,17 +570,20 @@ const I18N = {
     tokenCache: "Cache",
     tokenOutput: "Output",
     tokenValue: "API value",
+    customTokenValue: "API value (custom)",
+    customTokenValueHint: "Estimated using your custom rates; not a subscription charge.",
     tokenValueHint: "Estimated from public standard text API prices; excludes long-context, regional, tool, and cache-storage surcharges, and is not your subscription bill.",
     tokenValuePartial: (models) => `Known models only; not priced: ${models}`,
     tokenValueUnavailable: "No public API price is available for the current model.",
     refreshTip: "Refresh",
     refreshing: "Refreshing data",
     refreshComplete: "Data updated",
+    resetIn: (value) => `Resets in ${value}`,
     pinTip: "Pin",
     unpinTip: "Unpin",
     compactTip: "Compact view",
     expandTip: "Expand view",
-    closeTip: "Close",
+    closeTip: "Hide to tray",
     settingsTitle: "Settings",
     settingsSubtitle: "Appearance, sources, and shortcuts",
     appearanceSectionTitle: "Appearance",
@@ -795,13 +809,15 @@ function applyLang(lang) {
     });
     applyPinnedState(elements.pinButton.classList.contains("active"));
     applyCompactState(isCompact);
+    dashboardControls?.updateLanguage();
     if (lastSnapshot) render(lastSnapshot);
     else syncModelSelect(mergedModels);
   } catch(e) { /* don't crash on i18n */ }
 }
 
-async function refresh({ manual = false } = {}) {
+async function refresh({ manual = false, afterCurrent = false } = {}) {
   if (isRefreshing) {
+    if (manual || afterCurrent) queuedRefresh = { manual: manual || queuedRefresh?.manual || false };
     return;
   }
   isRefreshing = true;
@@ -811,8 +827,11 @@ async function refresh({ manual = false } = {}) {
   elements.refreshButton.setAttribute("aria-label", t("refreshing"));
   elements.appStatus.textContent = t("refreshing");
   try {
-    render(await window.aiQuota.refresh({ manual }));
-    elements.appStatus.textContent = t("refreshComplete");
+    const snapshot = await window.aiQuota.refresh({ manual });
+    if (snapshot?.superseded) return;
+    render(snapshot);
+    if (manual) await dashboardControls?.refresh({ force: true });
+    elements.appStatus.textContent = snapshot.errors?.length ? t("refreshFailed") : t("refreshComplete");
   } catch (error) {
     console.error("Failed to refresh dashboard", error);
     elements.appStatus.textContent = t("refreshFailed");
@@ -822,6 +841,11 @@ async function refresh({ manual = false } = {}) {
     elements.shell.setAttribute("aria-busy", "false");
     elements.refreshButton.disabled = false;
     elements.refreshButton.setAttribute("aria-label", t("refreshTip"));
+    if (queuedRefresh) {
+      const next = queuedRefresh;
+      queuedRefresh = null;
+      refresh(next);
+    }
   }
 }
 
@@ -873,7 +897,17 @@ async function setCompact(compact) {
 
 function applyCompactState(compact) {
   clearCardFocus();
+  const changed = isCompact !== Boolean(compact);
   isCompact = Boolean(compact);
+  if (isCompact) {
+    cancelHistoryRender();
+    ++tokenRenderGeneration;
+  } else if (changed && lastSnapshot) {
+    render(lastSnapshot);
+    scheduleHistoryRender(true);
+    // Run after setCompact has reached the main process.
+    setTimeout(() => refresh({ afterCurrent: true }), 0);
+  }
   localStorage.setItem("compact", isCompact ? "1" : "0");
   document.body.classList.toggle("compact", isCompact);
   elements.compactButton.title = isCompact ? t("expandTip") : t("compactTip");
@@ -894,6 +928,7 @@ function applyPinnedState(pinned) {
 
 
 function render(snapshot) {
+  if (snapshot?.superseded) return;
   try {
     lastSnapshot = snapshot;
     if (snapshot?.config) {
@@ -905,6 +940,11 @@ function render(snapshot) {
     elements.updatedAt.classList.toggle("error", Boolean(snapshot?.error));
     elements.updatedAt.title = snapshot?.error ?? "";
 
+    renderQuotaContext(snapshot);
+    if (!snapshot?.stale) recordHistory(quota);
+    dashboardControls?.updateSnapshot(snapshot);
+    if (isCompact || document.hidden) return;
+    if (dashboardControls?.active) { dashboardControls.refresh(); return; }
     mergedModels = buildMergedModels(snapshot);
     selectableModelSources = new Set(mergedModels.map((model) => model.source).filter(Boolean));
     if (snapshot?.config?.enableAntigravity && (snapshot?.antigravityQuota || snapshot?.antigravityTokenUsage)) {
@@ -912,9 +952,6 @@ function render(snapshot) {
     }
     const tokenData = getTokenForModel(snapshot, selectedModel);
     renderTokenStats(tokenData, mergedModels, ++tokenRenderGeneration);
-    renderQuotaContext(snapshot);
-
-    if (!snapshot?.stale) recordHistory(quota);
     scheduleHistoryRender();
   } catch (e) {
     elements.updatedAt.textContent = "ERR:" + (e.message || "").slice(0, 30);
@@ -966,9 +1003,7 @@ function setupTokenRangeToggle() {
         await renderTokenStats(tokenData, mergedModels, renderId);
       }
 
-      if (renderId === tokenRenderGeneration) {
-        elements.tokenCardBody.classList.remove("switching");
-      }
+      elements.tokenCardBody.classList.remove("switching");
     });
   });
 }
@@ -1049,7 +1084,17 @@ function syncModelSelect(modelUsage) {
     sourceKeys,
     models.map((item) => [item.source, item.sourceModel || item.model, item.model])
   ]);
-  if (nextSignature === modelMenuSignature) return;
+  if (nextSignature === modelMenuSignature) {
+    for (const option of elements.modelPickerMenu.querySelectorAll(".model-picker-model")) {
+      const item = models.find((model) => (model.sourceModel || model.model) === option.dataset.model);
+      const usage = option.querySelector(".model-picker-usage");
+      if (item && usage) {
+        usage.textContent = formatToken(item.total);
+        option.title = `${item.model} · ${usage.textContent} Token`;
+      }
+    }
+    return;
+  }
   modelMenuSignature = nextSignature;
   updateModelPickerWidth(models);
   elements.modelPickerMenu.replaceChildren();
@@ -1135,6 +1180,7 @@ function buildModelOption(item) {
   const option = document.createElement("button");
   option.type = "button";
   option.className = "model-picker-option";
+  option.dataset.model = item.model;
   if (item.kind === "source") option.classList.add("model-picker-source");
   if (item.kind === "model") option.classList.add("model-picker-model");
   option.setAttribute("role", "option");
@@ -1155,8 +1201,10 @@ function buildModelOption(item) {
   if (item.source) option.dataset.source = item.source;
   option.addEventListener("click", () => {
     selectedModel = item.model;
+    localStorage.setItem("selectedModel", selectedModel);
     closeModelPicker({ restoreFocus: true });
     syncModelSelect(mergedModels);
+    if (dashboardControls?.active) { dashboardControls.invalidate(); dashboardControls.refresh(); return; }
     if (lastSnapshot) {
       const data = getTokenForModel(lastSnapshot, selectedModel);
       renderTokenStats(data, mergedModels, ++tokenRenderGeneration);
@@ -1244,6 +1292,7 @@ function renderWindow(prefix, quotaWindow, fallbackLabel, hideWhenMissing = true
   elements[`${prefix}Reset`].textContent = unlimited
     ? t("unlimited")
     : quotaWindow?.resetsAt ? formatDateTime(quotaWindow.resetsAt) : t("waitingData");
+  elements[`${prefix}Reset`].title = quotaWindow?.resetsAt ? formatDateTime(quotaWindow.resetsAt) : "";
   elements[`${prefix}ResetCompact`].textContent = unlimited
     ? "∞"
     : quotaWindow?.resetsAt ? formatCompactDate(quotaWindow.resetsAt) : "--";
@@ -1407,7 +1456,7 @@ function resetStatusLabel(status) {
 }
 
 async function renderTokenStats(stats, modelUsage, renderId) {
-  if (renderId !== tokenRenderGeneration) return;
+  if (isCompact || document.hidden || renderId !== tokenRenderGeneration) return;
   syncModelSelect(modelUsage);
 
   let displayStats = stats;
@@ -1500,7 +1549,8 @@ async function renderTokenStats(stats, modelUsage, renderId) {
 }
 
 function renderTokenValue(stats, hasTokenData) {
-  elements.tokenValueLabel.textContent = t("tokenValue");
+  const custom = stats?.customPrice || stats?.modelUsage?.some((item) => item.customPrice);
+  elements.tokenValueLabel.textContent = t(custom ? "customTokenValue" : "tokenValue");
   const estimate = hasTokenData ? window.TokenPricing?.estimateTokenCost(stats) : null;
   if (!estimate?.pricedModels) {
     elements.tokenValue.textContent = "--";
@@ -1512,7 +1562,7 @@ function renderTokenValue(stats, hasTokenData) {
   const formattedValue = window.TokenPricing.formatUsd(estimate.usd);
   elements.tokenValue.textContent = `≈ ${formattedValue}${estimate.complete ? "" : "+"}`;
   elements.tokenValueBox.classList.remove("unavailable");
-  elements.tokenValueBox.title = estimate.complete
+  elements.tokenValueBox.title = custom ? t("customTokenValueHint") : estimate.complete
     ? t("tokenValueHint")
     : `${t("tokenValueHint")} ${t("tokenValuePartial", estimate.unknownModels.join(", "))}`;
 }
@@ -1542,9 +1592,16 @@ function recordHistory(quota) {
   localStorage.setItem("quotaHistory", JSON.stringify(history));
 }
 
+function cancelHistoryRender() {
+  if (historyRenderTimer) clearTimeout(historyRenderTimer);
+  historyRenderTimer = null;
+  historyRenderQueued = false;
+  historyRenderQueuedImmediate = false;
+}
+
 function scheduleHistoryRender(immediate = false) {
   if (!historyRenderingEnabled) return;
-  if (document.hidden) return;
+  if (isCompact || document.hidden) return;
   if (historyRenderInFlight) {
     historyRenderQueued = true;
     historyRenderQueuedImmediate ||= immediate;
@@ -1558,7 +1615,7 @@ function scheduleHistoryRender(immediate = false) {
   }
   historyRenderTimer = setTimeout(async () => {
     historyRenderTimer = null;
-    if (document.hidden) return;
+    if (isCompact || document.hidden) return;
     historyRenderInFlight = true;
     try {
       await renderHistory();
@@ -1570,12 +1627,14 @@ function scheduleHistoryRender(immediate = false) {
         historyRenderQueued = false;
         historyRenderQueuedImmediate = false;
         scheduleHistoryRender(queuedImmediate);
-      }
+      } else scheduleHistoryRender();
     }
   }, delay);
 }
 
 async function renderHistory() {
+  if (isCompact || document.hidden) return;
+  if (dashboardControls?.active) { await dashboardControls.refresh(); return; }
   const modelForRender = selectedModel;
   let daily = {};
   let hourly = [];
@@ -1615,7 +1674,7 @@ async function renderHistory() {
     }
   }
 
-  if (modelForRender !== selectedModel) return;
+  if (isCompact || document.hidden || modelForRender !== selectedModel) return;
   renderTrendWithData(daily, hourly);
   renderHeatmapWithData(daily);
 }
@@ -1636,22 +1695,13 @@ function mergeDailyMaps(...maps) {
 }
 
 function mergeHourlyBuckets(...bucketArrays) {
-  const maxLen = Math.max(...bucketArrays.map((a) => a.length), 0);
-  if (maxLen === 0) return [];
-  // Use the bucket array with the most entries as the base, or create new
-  const base = bucketArrays.find((a) => a.length === maxLen) || [];
-  const result = base.map((b) => ({ ...b }));
-  for (const buckets of bucketArrays) {
-    if (buckets === base) continue;
-    for (let i = 0; i < Math.min(result.length, buckets.length); i++) {
-      result[i].input += buckets[i].input || 0;
-      result[i].cached += buckets[i].cached || 0;
-      result[i].output += buckets[i].output || 0;
-      result[i].reasoning += buckets[i].reasoning || 0;
-      result[i].total += buckets[i].total || 0;
-    }
+  const buckets = new Map();
+  for (const values of bucketArrays) for (const value of values) {
+    if (!buckets.has(value.t)) buckets.set(value.t, { t: value.t, input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 });
+    const bucket = buckets.get(value.t);
+    for (const key of ["input", "cached", "cacheWrite", "output", "reasoning", "total"]) bucket[key] += value[key] || 0;
   }
-  return result;
+  return [...buckets.values()].sort((a,b) => a.t-b.t);
 }
 
 function renderTrendWithData(daily, hourly) {
@@ -1688,10 +1738,13 @@ function renderTrendWithData(daily, hourly) {
   elements.trendAverage.textContent = t("sevenDayAverage", formatToken(Math.round(weekTotal / 7)));
 }
 
-function renderHeatmapWithData(daily) {
-  const today = new Date();
+function renderHeatmapWithData(daily, range = null) {
+  const focusedDate = elements.hitHeatmap.contains(document.activeElement) ? document.activeElement.dataset.date : null;
+  const today = new Date(range?.end || Date.now());
   const days = [];
-  for (let i = 41; i >= 0; i--) {
+  const ordinal = (time) => { const date=new Date(time); return Date.UTC(date.getFullYear(),date.getMonth(),date.getDate()); };
+  const count = range ? Math.min(42, Math.max(1, (ordinal(range.end)-ordinal(range.start))/86400000+1)) : 42;
+  for (let i = count-1; i >= 0; i--) {
     const d = new Date(today);
     d.setDate(d.getDate() - i);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -1717,6 +1770,13 @@ function renderHeatmapWithData(daily) {
     fragment.append(cell);
   });
   elements.hitHeatmap.replaceChildren(fragment);
+  if (focusedDate) {
+    const cell = [...elements.hitHeatmap.children].find((item) => item.dataset.date === focusedDate);
+    if (cell) {
+      for (const item of elements.hitHeatmap.children) item.tabIndex = item === cell ? 0 : -1;
+      cell.focus({ preventScroll: true });
+    }
+  }
 
   const lastToken = tokenValues.at(-1);
   elements.hitTrendLabel.textContent = lastToken == null ? t("noData") : formatToken(lastToken);
@@ -1902,6 +1962,8 @@ function setupExpandableCards() {
   document.querySelectorAll(".interactive-card[data-expand-title]:not(#resetRow)").forEach((card) => {
     card.setAttribute("aria-expanded", "false");
     card.addEventListener("click", (event) => {
+      // Child controls stay interactive in both normal and expanded views.
+      if (event.target.closest("button, input, select, a, [role=button], .range-picker, .reset-row, .detail-target, .chart-shell, .hit-heatmap")) return;
       if (focusedCard === card) {
         event.stopPropagation();
         toggleCardFocus(card);
@@ -1912,7 +1974,6 @@ function setupExpandableCards() {
         refresh({ manual: true });
         return;
       }
-      if (event.target.closest("button, input, select, a, [role=button], .reset-row, .detail-target, .chart-shell, .hit-heatmap")) return;
       event.stopPropagation();
       toggleCardFocus(card);
     });
@@ -2076,3 +2137,33 @@ function generateAndSaveTrayIcon() {
     console.error("Failed to generate tray icon:", e);
   }
 }
+
+function renderUsageReport(report, title) {
+  currentReport = report;
+  tokenRange = "24h";
+  const previousSelection = selectedModel;
+  mergedModels = report.catalog.map((item) => ({ ...item, sourceModel: item.source + ":" + item.model, currentUsage: false }));
+  selectableModelSources = new Set(mergedModels.map((item) => item.source));
+  const stats = window.ModelUsage.mergeTokenItems(report.models, "merged");
+  renderTokenStats(stats, mergedModels, ++tokenRenderGeneration).then(() => { elements.tokenCardTitle.textContent = title + " Token"; });
+  if (previousSelection !== selectedModel) { dashboardControls.invalidate(); dashboardControls.refresh(); return; }
+  const context = report.contextHistory || report.history;
+  renderTrendWithData(context.daily, report.history.hourly);
+  document.getElementById("trend7Chart").closest(".trend-panel").hidden = false;
+  if (!["24h", "today"].includes(report.range.preset)) {
+    const series = window.ReportView.series(report);
+    const ticks = series.length <= 1 ? series : [series[0], series[Math.floor(series.length/2)], series.at(-1)];
+    renderTokenChart("7", series, ticks.map((item) => ({ x:item.x,label:item.label })));
+    document.getElementById("trend7Label").textContent = title;
+    elements.trend7Summary.textContent = formatToken(stats?.total || 0);
+    elements.trendTotal.textContent = title + " · " + formatToken(stats?.total || 0);
+    elements.trendDelta.textContent = title;
+  } else {
+    document.getElementById("trend24Label").textContent = t("trend24Label");
+    document.getElementById("trend7Label").textContent = t("trend7Label");
+  }
+  elements.trendAverage.title = report.readError || "";
+  renderHeatmapWithData(context.daily, ["24h", "today"].includes(report.range.preset) ? null : report.range);
+}
+
+dashboardControls = window.DashboardControls?.create({ onReport: renderUsageReport, selection: () => selectedModel, isPaused: () => isCompact || document.hidden });

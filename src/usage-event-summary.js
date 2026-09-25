@@ -12,7 +12,7 @@ function summarizeUsageEvents(events, {
   const dayMs = 24 * 60 * 60 * 1000;
   const since = days == null ? 0 : now - days * dayMs;
   const catalogSince = catalogDays == null ? 0 : now - Math.max(days, catalogDays) * dayMs;
-  const catalogEvents = events.filter((event) => event.t >= catalogSince);
+  const catalogEvents = events.filter((event) => event.t >= catalogSince && event.t <= now);
   const currentEvents = catalogEvents.filter((event) => event.t >= since);
   const modelUsage = summarizeModels(currentEvents, source);
   const modelCatalog = days == null || catalogDays == null || catalogDays > days
@@ -58,7 +58,7 @@ function historyFromUsageEvents(events, {
   const hourMs = 60 * 60 * 1000;
   const dailySince = now - days * dayMs;
   const hourlySince = now - hours * hourMs;
-  const filtered = events.filter((event) => event.t >= dailySince && matchesModel(event, model));
+  const filtered = events.filter((event) => event.t >= dailySince && event.t <= now && matchesModel(event, model));
   const daily = {};
 
   for (const event of filtered) {

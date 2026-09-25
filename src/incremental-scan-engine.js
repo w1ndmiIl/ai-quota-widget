@@ -10,6 +10,12 @@ const SWEEP_INTERVAL_MS = 5 * 60_000;
 let memoryCache = null;
 let memoryCachePath = null;
 let memoryCacheSignature = null;
+const scanMetrics = {};
+function namespacePath(namespace) {
+  const file = getCachePath();
+  return process.env.AI_QUOTA_PARTITION_LEDGER === "1" && namespace
+    ? file.replace(/\.json$/, `.${namespace.replace(/[^a-z0-9-]/gi, "_")}.json`) : file;
+}
 
 function getCachePath() {
   if (process.env.HISTORY_ACCUMULATOR_PATH) {
@@ -29,8 +35,8 @@ function emptyCache() {
   return { version: CACHE_VERSION, namespaces: {} };
 }
 
-function loadCache() {
-  const cachePath = getCachePath();
+function loadCache(namespace) {
+  const cachePath = namespacePath(namespace);
   try {
     const stat = fs.statSync(cachePath);
     const signature = `${stat.mtimeMs}:${stat.size}`;
@@ -48,6 +54,15 @@ function loadCache() {
     console.warn("Ignoring incompatible history accumulator cache");
   } catch (error) {
     if (error?.code === "ENOENT") {
+      if (cachePath !== getCachePath()) {
+        try {
+          const legacy = JSON.parse(fs.readFileSync(getCachePath(), "utf8"));
+          if (legacy.version === CACHE_VERSION && legacy.namespaces?.[namespace]) {
+            const migrated = { version: CACHE_VERSION, namespaces: { [namespace]: legacy.namespaces[namespace] } };
+            saveCache(migrated, namespace); return migrated;
+          }
+        } catch {}
+      }
       if (memoryCachePath !== cachePath || memoryCacheSignature !== null) {
         memoryCache = emptyCache();
         memoryCachePath = cachePath;
@@ -63,8 +78,8 @@ function loadCache() {
   return memoryCache;
 }
 
-function saveCache(cache) {
-  const cachePath = getCachePath();
+function saveCache(cache, namespace) {
+  const cachePath = namespacePath(namespace);
   const dir = path.dirname(cachePath);
   const temporaryPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
   try {
@@ -124,7 +139,10 @@ function scanFilesIncrementally(filePaths, parseFile, {
   retainDeleted = false,
   retainLastValid = retainDeleted
 } = {}) {
-  const cache = loadCache();
+  const started = Date.now();
+  let parsed = 0;
+  let failures = 0;
+  const cache = loadCache(namespace);
   const state = getNamespace(cache, namespace);
   let dirty = false;
 
@@ -133,6 +151,7 @@ function scanFilesIncrementally(filePaths, parseFile, {
     try {
       stat = fs.statSync(filePath);
     } catch {
+      failures++;
       continue;
     }
 
@@ -147,9 +166,18 @@ function scanFilesIncrementally(filePaths, parseFile, {
     }
 
     try {
-      state.files[filePath] = { mtimeMs, size, data: parseFile(filePath) };
+      let data = parseFile(filePath);
+      const recoveredEvents = cachedItem?.recoveredEvents;
+      if (namespace === "antigravity" && Array.isArray(data) && Array.isArray(recoveredEvents)) {
+        const key = (event) => JSON.stringify([event.sessionId,event.t,event.model,event.output,event.reasoning]);
+        const known = new Set(data.map(key));
+        data = [...data,...recoveredEvents.filter((event) => !known.has(key(event)))].sort((a,b)=>a.t-b.t);
+      }
+      state.files[filePath] = { mtimeMs, size, data, ...(recoveredEvents ? { recoveredEvents } : {}) };
+      parsed++;
       dirty = true;
     } catch (error) {
+      failures++;
       console.error(`Failed to parse file: ${filePath}`, error);
       // A changed file must never silently fall back to an older parsed result.
       if (cachedItem && !retainLastValid) {
@@ -164,7 +192,8 @@ function scanFilesIncrementally(filePaths, parseFile, {
     dirty = sweepDeletedFiles(state, retainDeleted) || dirty;
   }
 
-  if (dirty) saveCache(cache);
+  if (dirty) saveCache(cache, namespace);
+  scanMetrics[namespace] = { files: filePaths.length, parsed, reused: filePaths.length - parsed, failures, elapsedMs: Date.now()-started, at: Date.now() };
 
   const result = {};
   const resultPaths = retainDeleted ? Object.keys(state.files) : filePaths;
@@ -179,4 +208,5 @@ module.exports = {
   CACHE_VERSION,
   scanFilesIncrementally,
   getCachePath
+  , getScanMetrics: () => ({ ...scanMetrics })
 };

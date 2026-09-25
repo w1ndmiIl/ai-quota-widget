@@ -1,4 +1,5 @@
 "use strict";
+const { memoScan } = require("./scan-memo");
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -24,7 +25,11 @@ function readClineTokenHistory(options = {}) {
   return historyFromUsageEvents(readClineEvents({ roots: options.roots }), options);
 }
 
-function readClineEvents({ roots = defaultClineRoots() } = {}) {
+function readClineEvents(options) {
+  return memoScan(JSON.stringify(["readClineEvents", process.env.HISTORY_ACCUMULATOR_PATH, process.env.AI_QUOTA_USER_DATA_PATH, options]), () => scanreadClineEvents(options));
+}
+
+function scanreadClineEvents({ roots = defaultClineRoots() } = {}) {
   const files = listClineMessageFiles(roots);
   const parsed = scanFilesIncrementally(files, readClineMessageFile, { namespace: "cline", retainDeleted: true });
   const events = [];

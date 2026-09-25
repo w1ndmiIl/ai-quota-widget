@@ -133,10 +133,13 @@
   color: #aeb9c3;
 }
 
-:root[data-theme="dark"] .chart-axes text,
+:root[data-theme="dark"] .chart-axes text {
+  fill: #aeb9c3;
+}
+
 :root[data-theme="dark"] .chart-axes .axis-line,
 :root[data-theme="dark"] .chart-axes path {
-  fill: #aeb9c3;
+  fill: none;
   stroke: rgba(218, 229, 238, 0.24);
 }
 

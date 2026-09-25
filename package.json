@@ -1,14 +1,17 @@
 {
   "name": "ai-quota-widget",
-  "version": "1.4.0",
+  "version": "1.5.2",
   "description": "本地 AI Agent 额度与 Token 用量桌面悬浮窗",
   "author": "w1ndwill",
   "license": "MIT",
   "type": "commonjs",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node scripts/run-electron.cjs",
     "test": "node --test",
+    "check": "node scripts/check.js",
+    "test:ui": "node scripts/run-electron.cjs scripts/smoke-renderer.cjs",
+    "verify:package": "node scripts/verify-package.cjs",
     "build:win": "node scripts/build-win.js --win dir",
     "release:win": "node scripts/build-win.js --win nsis zip"
   },
@@ -22,7 +25,7 @@
     "desktop-widget"
   ],
   "devDependencies": {
-    "electron": "^33.3.1",
+    "electron": "44.3.0",
     "electron-builder": "^25.1.8",
     "rcedit": "^5.0.2"
   },
@@ -45,6 +48,7 @@
       "signAndEditExecutable": false
     },
     "nsis": {
+      "include": "scripts/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }

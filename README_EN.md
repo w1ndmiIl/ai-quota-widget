@@ -6,31 +6,19 @@ A Windows desktop widget for viewing Codex quota and local token usage from Code
 
 ## Screenshots
 
-These screenshots come from the current application running with local data; quota, token, and model values vary by machine. Click an image to open it at full size.
+These screenshots come from the v1.5.2 renderer with simulated quota and token data; they do not represent your account. Click an image to view it at full size.
 
-### Quota and usage overview
+### Dashboard and date range
 
-[![AI Quota dashboard](docs/images/en/dashboard-overview.jpg)](docs/images/en/dashboard-overview.jpg)
+[![Quota and token overview](docs/images/v1.5.2/en-overview.png)](docs/images/v1.5.2/en-overview.png)
 
-View Codex quota, reset cards, 24-hour and cumulative token usage, trends, a daily heatmap, and cache-hit rates.
+[![Date-range menu inside the token card](docs/images/v1.5.2/en-range-picker.png)](docs/images/v1.5.2/en-range-picker.png)
 
-### Filter models by source
+The token card offers a rolling 24-hour range, today, 7 or 30 days, all history, and custom dates. Changing the range updates usage and trend data while quota readings stay in place.
 
-[![Model source filter](docs/images/en/model-source-filter.jpg)](docs/images/en/model-source-filter.jpg)
+### Compact view
 
-Aggregate or filter model usage by Codex, Claude Code, OpenCode, Gemini CLI, Cline, and Antigravity.
-
-### Data sources and appearance
-
-[![Data-source and appearance settings](docs/images/en/settings-data-sources.jpg)](docs/images/en/settings-data-sources.jpg)
-
-Enable each data source independently and configure the language, theme, and global shortcuts. Language changes update the dashboard, charts, model picker, and accessibility labels together.
-
-### Compact mode
-
-[![Compact mode](docs/images/en/compact-mode.jpg)](docs/images/en/compact-mode.jpg)
-
-Shrink the window to `336 × 72` logical pixels with only the two quota periods plus pin and expand controls.
+[![Compact view](docs/images/v1.5.2/en-compact.png)](docs/images/v1.5.2/en-compact.png)
 
 ## Features
 
@@ -56,7 +44,7 @@ Shrink the window to `336 × 72` logical pixels with only the two quota periods 
 | Cline | Task logs in VS Code-family global storage and `~/.cline/data` |
 | Antigravity | Short-lived official background service for Gemini 5h/weekly quota, plus local transcript estimates |
 
-OpenCode, Gemini CLI, and Cline are the new agent sources prioritized by public adoption, and the interface follows that order. The ranking uses reproducible GitHub stars as a popularity proxy (2026-08-10 snapshot: OpenCode 195.7k, Gemini CLI 106.4k, Cline 65.9k), not as a claim of actual active-user counts. OpenCode requires an installed local CLI. Gemini CLI reads token summaries from its official session records. Cline covers common data locations for VS Code, VS Code Insiders, VSCodium, Cursor, Windsurf, and Cline CLI.
+OpenCode requires its local CLI. Gemini CLI contributes session token summaries. Cline covers common data locations for VS Code, VS Code Insiders, VSCodium, Cursor, Windsurf, and Cline CLI.
 
 ### Application architecture
 
@@ -66,9 +54,14 @@ OpenCode, Gemini CLI, and Cline are the new agent sources prioritized by public 
 | `app-config-store.js` / `dashboard-snapshot-store.js` | Configuration and dashboard-snapshot persistence |
 | `usage-coordinator.js` / `usage-worker-client.js` | Usage caches, request coalescing, and worker lifecycle |
 | `usage-worker.js` and Agent services | Local-session scanning and aggregation off the main thread |
-| `renderer.js` / `model-usage.js` | UI interaction, chart rendering, and pure model aggregation |
+| `renderer.js` / `model-usage.js` | Original UI interaction, charts, and model aggregation |
+| `dashboard-controls.js` / `report-view.js` | Date-range menu and trend data for the selected range |
 
 While the window is visible, the usage worker is reused across the one-minute history refresh cadence. Hiding the window still releases the worker and Codex subprocess under the existing idle policy. The model menu is rebuilt only when its structure or selection actually changes.
+
+Codex and Claude current, historical, and cumulative views share a short-lived event cache. OpenCode exports run asynchronously, share concurrent requests, and publish results in batches. Quota and token data update independently; failed reads retain the last valid values. Compact mode refreshes quota only and pauses hidden charts and token queries until the panel expands.
+
+Consecutive dashboard saves are coalesced and written through an atomic file replacement. Normal shutdown waits up to two seconds for pending snapshot writes.
 
 Default shortcuts:
 
@@ -87,14 +80,21 @@ The application reads session files for the current user only. OpenCode sessions
 
 The UI's HTML, CSS, and JavaScript load once when the window starts. While running, only quota and local-log data are refreshed as needed. Hiding the app to the tray pauses UI refreshes and releases the log worker and app-managed Codex subprocess after an idle period.
 
+## Date ranges and history
+
+Choose rolling 24 hours, today, 7 / 30 days, all history or custom calendar dates. The model menu retains the complete historical catalog ranked by cumulative usage; the token card uses the selected range. The default 24-hour and seven-day charts remain, while other ranges use the lower chart. Heatmaps show at most the last 42 days of the range.
+
+Recovered Gemini estimates survive later rescans without double-counting. Keep the complete `.userdata` directory when moving a portable installation; the installer backs it up and restores it during an upgrade.
+
 ## Development
 
-Node.js 20 or newer is required.
+Node.js 22.12 or newer is required (Electron 44.3.0).
 
 ```powershell
-npm install
+npm ci
 npm start
-npm test
+npm run check
+npm run test:ui
 ```
 
 Build the unpacked Windows application:
@@ -110,7 +110,8 @@ npm run release:win
 ```
 
 Build artifacts are written to `release/`. See [CHANGELOG.md](CHANGELOG.md) for version history.
-When rebuilding the unpacked app, the build script preserves settings and caches in `release/win-unpacked/.userdata`.
+When rebuilding the unpacked app, the build script preserves settings and caches in `release/win-unpacked/.userdata`. During an upgrade, the installer backs up `.userdata` beside the old installation in a `.ai-bar-data-backup` directory, restores it after installation, and keeps the backup for recovery.
+Build and release commands run JavaScript syntax checks and the full test suite before packaging. GitHub Actions runs the same checks on Windows with Node.js 22 and 24. The default builder cache is `.cache/electron-builder` inside the project.
 
 ## Project structure
 

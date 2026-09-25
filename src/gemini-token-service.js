@@ -1,4 +1,5 @@
 "use strict";
+const { memoScan } = require("./scan-memo");
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -23,7 +24,11 @@ function readGeminiTokenHistory(options = {}) {
   return historyFromUsageEvents(readGeminiEvents({ roots: options.roots }), options);
 }
 
-function readGeminiEvents({ roots = defaultGeminiRoots() } = {}) {
+function readGeminiEvents(options) {
+  return memoScan(JSON.stringify(["readGeminiEvents", process.env.HISTORY_ACCUMULATOR_PATH, process.env.AI_QUOTA_USER_DATA_PATH, options]), () => scanreadGeminiEvents(options));
+}
+
+function scanreadGeminiEvents({ roots = defaultGeminiRoots() } = {}) {
   const files = listGeminiSessionFiles(roots);
   const parsed = scanFilesIncrementally(files, readGeminiSessionFile, { namespace: "gemini", retainDeleted: true });
   const events = [];

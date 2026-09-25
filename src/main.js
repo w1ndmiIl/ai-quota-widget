@@ -1,8 +1,11 @@
 "use strict";
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, globalShortcut } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, globalShortcut, screen, dialog, clipboard, Notification, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
+const { chooseDataDirectory, visibleBounds, quotaNotices } = require("./desktop-preferences");
+const { sourceHealth } = require("./source-health");
+const { resolveRange, serializeReport } = require("./usage-report");
 const { loadAppConfig, normalizeAppConfig, persistAppConfig, sourceConfigChanged } = require("./app-config-store");
 const { AntigravityQuotaService } = require("./antigravity-quota-service");
 const { CodexService } = require("./codex-service");
@@ -21,11 +24,6 @@ app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 app.commandLine.appendSwitch("disable-speech-api");
 app.commandLine.appendSwitch("disable-webrtc");
 
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
-  app.quit();
-  process.exit(0);
-}
 
 app.on("second-instance", () => {
   if (mainWindow) {
@@ -38,9 +36,16 @@ app.on("second-instance", () => {
 
 // Configure portable userData directory inside project folder (D drive) instead of C drive
 const appDir = app.isPackaged ? path.dirname(app.getPath("exe")) : app.getAppPath();
-const userDataPath = path.join(appDir, ".userdata");
+const dataLocation = chooseDataDirectory(path.join(appDir, ".userdata"), app.getPath("userData"));
+const userDataPath = dataLocation.directory;
 app.setPath("userData", userDataPath);
 process.env.AI_QUOTA_USER_DATA_PATH = userDataPath;
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+  process.exit(0);
+}
 
 const NORMAL_SIZE = { width: 760, height: 540 };
 const COMPACT_SIZE = { width: 336, height: 72 };
@@ -92,7 +97,7 @@ function scheduleBackgroundIdle() {
     if (mainWindow?.isVisible()) return;
     codex.dispose();
     antigravityQuota.dispose();
-    usageCoordinator.stop();
+    usageCoordinator.stop(true);
   }, BACKGROUND_IDLE_MS);
   backgroundIdleTimer.unref?.();
 }
@@ -101,6 +106,8 @@ function toggleAlwaysOnTop() {
   if (!mainWindow) return false;
   const pinned = !mainWindow.isAlwaysOnTop();
   mainWindow.setAlwaysOnTop(pinned);
+  appConfig = { ...appConfig, pinned };
+  persistAppConfig(configPath, appConfig);
   mainWindow.webContents.send("window:pinnedChanged", pinned);
   return pinned;
 }
@@ -142,12 +149,12 @@ function registerGlobalShortcuts(rawHotkeys) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    ...NORMAL_SIZE,
+    ...visibleBounds(appConfig.windowBounds, screen.getAllDisplays(), NORMAL_SIZE.width, NORMAL_SIZE.height),
     minWidth: COMPACT_SIZE.width,
     minHeight: COMPACT_SIZE.height,
     frame: false,
     resizable: false,
-    alwaysOnTop: true,
+    alwaysOnTop: appConfig.pinned !== false,
     transparent: true,
     skipTaskbar: true, // Hide application from Dock / Windows Taskbar
     backgroundColor: "#00000000",
@@ -159,6 +166,26 @@ function createWindow() {
     }
   });
 
+  mainWindow.webContents.setZoomFactor(1);
+  let boundsTimer;
+  mainWindow.on("move", () => {
+    clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(() => {
+      if (isQuitting) return;
+      appConfig = { ...appConfig, windowBounds: mainWindow.getBounds() };
+      try { persistAppConfig(configPath, appConfig); } catch (error) { console.error(error); }
+    }, 300);
+  });
+  if (process.argv.includes("--smoke-test")) {
+    mainWindow.webContents.once("did-finish-load", async () => {
+      try {
+        await mainWindow.webContents.executeJavaScript('new Promise((resolve, reject) => { let attempts = 0; const timer = setInterval(() => { if (initialDataReady && currentReport) { clearInterval(timer); resolve(true); } else if (++attempts > 100) { clearInterval(timer); reject(new Error("Renderer startup timed out")); } }, 50); })');
+        fs.writeFileSync(path.join(userDataPath, "smoke-result.json"), JSON.stringify({ ok: true, version: app.getVersion(), electron: process.versions.electron }));
+      } catch (error) { fs.writeFileSync(path.join(userDataPath, "smoke-result.json"), JSON.stringify({ ok: false, error: error.message })); }
+      app.quit();
+    });
+  }
+  mainWindow.webContents.on("did-finish-load", () => mainWindow?.webContents.send("window:pinnedChanged", mainWindow.isAlwaysOnTop()));
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   mainWindow.on("show", () => {
     cancelBackgroundIdle();
@@ -188,7 +215,6 @@ function createTray() {
       {
         label: "退出",
         click: () => {
-          isQuitting = true;
           app.quit();
         }
       }
@@ -208,7 +234,6 @@ let lastResetCreditsTime = cachedResetCredits ? Number(initialResetCreditsSnapsh
 let resetCreditsPending = null;
 const RESET_CREDITS_CACHE_TTL = 5 * 60_000;
 let snapshotInFlight = null;
-let snapshotInFlightAllowsAntigravityStart = false;
 
 async function readCachedResetCredits() {
   const now = Date.now();
@@ -222,6 +247,7 @@ async function readCachedResetCredits() {
   resetCreditsPending = readResetCredits()
     .then((credits) => {
       cachedResetCredits = credits;
+      if (isQuitting || !appConfig.enableCodex) return credits;
       const cached = snapshotStore.getCached();
       if (cached) {
         const snapshot = { ...cached, resetCredits: credits, stale: false, updatedAt: Date.now() };
@@ -236,106 +262,83 @@ async function readCachedResetCredits() {
   return resetCreditsPending;
 }
 
-async function readSnapshot({ allowAntigravityStart = false } = {}) {
-  const errors = [];
-  let quota = null;
-  let resetCredits = null;
-  let localTokenUsage = null;
-  let antigravityTokenUsage = null;
-  let antigravityQuotaSnapshot = appConfig.enableAntigravity ? antigravityQuota.getCachedQuota() : null;
-  let quotaError = null;
-
-  const now = Date.now();
-  const tokenUsageResults = Promise.allSettled([
-    appConfig.enableAntigravity ? usageCoordinator.readAntigravityUsage(now) : Promise.resolve(null),
-    usageCoordinator.enabledLocalSources().length ? usageCoordinator.readLocalUsage(now) : Promise.resolve(null)
-  ]);
-  const antigravityQuotaResult = appConfig.enableAntigravity
-    ? Promise.resolve(antigravityQuota.readQuota({
-      allowStart: allowAntigravityStart,
-      force: allowAntigravityStart
-    })).then(
-      (value) => ({ status: "fulfilled", value }),
-      (reason) => ({ status: "rejected", reason })
-    )
-    : Promise.resolve({ status: "fulfilled", value: null });
-
-  if (appConfig.enableCodex) {
-    quota = codex.getCachedQuota();
-    // Reset-card data is auxiliary. Refresh it independently so a slow network
-    // request cannot hold back quota and local token data on the first paint.
-    readCachedResetCredits().catch(() => {});
-    const quotaResult = await Promise.resolve(codex.readQuota()).then(
-      (value) => ({ status: "fulfilled", value }),
-      (reason) => ({ status: "rejected", reason })
-    );
-
-    if (quotaResult.status === "fulfilled") {
-      quota = quotaResult.value;
-    } else {
-      errors.push(quotaResult.reason.message);
-      quotaError = quotaResult.reason.message;
-    }
-  }
-
-  // Parse local logs in a worker so a large transcript cannot block Electron's main loop.
-  const [antigravityResult, localResult] = await tokenUsageResults;
-  const quotaSourceResult = await antigravityQuotaResult;
-  resetCredits = cachedResetCredits;
-  if (antigravityResult.status === "fulfilled") {
-    antigravityTokenUsage = antigravityResult.value;
-  } else {
-    errors.push(antigravityResult.reason.message);
-  }
-  if (quotaSourceResult.status === "fulfilled") {
-    antigravityQuotaSnapshot = quotaSourceResult.value;
-  } else {
-    errors.push(quotaSourceResult.reason.message);
-  }
-  if (localResult.status === "fulfilled") {
-    localTokenUsage = localResult.value;
-    if (quota?.tokenStats && quota.tokenStats.total == null && localTokenUsage?.total != null) {
-      quota = {
-        ...quota,
-        tokenStats: {
-          ...quota.tokenStats,
-          ...localTokenUsage,
-          accountUsageError: quota.tokenStats.error ?? null,
-          error: null
-        }
-      };
-    }
-  } else {
-    errors.push(localResult.reason.message);
-  }
-
-  const snapshot = {
-    quota,
-    resetCredits,
-    localTokenUsage,
-    antigravityTokenUsage,
-    antigravityQuota: antigravityQuotaSnapshot,
-    config: appConfig,
-    // 重置卡和本地统计是辅助信息；它们失败时不能把一份成功的额度读数标成“刷新失败”。
-    error: quotaError,
-    errors,
-    updatedAt: Date.now()
+async function readSnapshot({ allowAntigravityStart = false, includeTokens = !isCompact } = {}) {
+  const config = appConfig;
+  const generation = usageCoordinator.generation;
+  const current = () => !isQuitting && generation === usageCoordinator.generation;
+  const initial = snapshotStore.getCached() || {};
+  let snapshot = {
+    ...initial,
+    quota: config.enableCodex ? initial.quota || codex.getCachedQuota() : null,
+    resetCredits: config.enableCodex ? cachedResetCredits : null,
+    antigravityQuota: config.enableAntigravity ? initial.antigravityQuota || antigravityQuota.getCachedQuota() : null,
+    localTokenUsage: usageCoordinator.enabledLocalSources().length ? initial.localTokenUsage || null : null,
+    antigravityTokenUsage: config.enableAntigravity ? initial.antigravityTokenUsage || null : null,
+    config, error: null, errors: [], refreshing: true
   };
-  snapshotStore.save(snapshot);
+  const failures = new Map();
+  const commit = (patch, source, complete = false) => {
+    if (!current()) return;
+    // Merge against the latest snapshot so auxiliary updates cannot be overwritten.
+    snapshot = { ...snapshot, ...snapshotStore.getCached(), ...patch, config,
+      stale: false, refreshing: !complete, error: failures.get("quota") || null,
+      errors: [...failures.values()], sourceErrors: Object.fromEntries(failures), updatedAt: Date.now() };
+    if (source) snapshot.sourceUpdatedAt = { ...snapshot.sourceUpdatedAt, [source]: Date.now() };
+    if (snapshot.quota?.tokenStats && snapshot.quota.tokenStats.total == null && snapshot.localTokenUsage?.total != null) {
+      snapshot.quota = { ...snapshot.quota, tokenStats: {
+        ...snapshot.quota?.tokenStats, ...snapshot.localTokenUsage,
+        accountUsageError: snapshot.quota?.tokenStats?.error ?? null, error: null
+      } };
+    }
+    snapshotStore.save(snapshot);
+    if (!complete) mainWindow?.webContents.send("quota:updated", snapshot);
+  };
+  const read = async (field, reader) => {
+    try {
+      const value = await reader();
+      if (value?.readError) failures.set(field, value.readError);
+      if (value != null) commit({ [field]: value }, value?.readError || value?.partial || value?.fromCache ? null : field);
+    } catch (error) {
+      failures.set(field, error?.message || String(error));
+      commit({});
+    }
+  };
+  const tasks = [];
+  if (config.enableCodex) {
+    readCachedResetCredits().catch(() => {});
+    tasks.push(read("quota", () => codex.readQuota()));
+  }
+  if (config.enableAntigravity) {
+    tasks.push(read("antigravityQuota", () => antigravityQuota.readQuota({
+      allowStart: allowAntigravityStart, force: allowAntigravityStart
+    })));
+    if (includeTokens) tasks.push(read("antigravityTokenUsage", () => usageCoordinator.readAntigravityUsage()));
+  }
+  if (includeTokens && usageCoordinator.enabledLocalSources().length) {
+    tasks.push(read("localTokenUsage", () => usageCoordinator.readLocalUsage(Date.now(),
+      (value) => commit({ localTokenUsage: value }))));
+  }
+  await Promise.all(tasks);
+  if (!current()) return { superseded: true };
+  commit({ resetCredits: config.enableCodex ? cachedResetCredits : null }, null, true);
   return snapshot;
 }
 
 async function readSnapshotOnce({ allowAntigravityStart = false } = {}) {
-  if (snapshotInFlight) {
-    if (!allowAntigravityStart || snapshotInFlightAllowsAntigravityStart) return snapshotInFlight;
-    try { await snapshotInFlight; } catch {}
+  if (allowAntigravityStart && !snapshotInFlight) { usageCoordinator.clearCaches(); usageCoordinator.stop(true); }
+  const key = usageCoordinator.generation + ":" + isCompact;
+  const existing = snapshotInFlight;
+  if (existing && existing.key === key) {
+    if (!allowAntigravityStart || existing.allowStart) return existing.promise;
+    try { await existing.promise; } catch {}
+    return readSnapshotOnce({ allowAntigravityStart });
   }
-  snapshotInFlightAllowsAntigravityStart = allowAntigravityStart;
-  snapshotInFlight = readSnapshot({ allowAntigravityStart }).finally(() => {
-    snapshotInFlight = null;
-    snapshotInFlightAllowsAntigravityStart = false;
+  const flight = { key, allowStart: allowAntigravityStart };
+  snapshotInFlight = flight;
+  flight.promise = readSnapshot({ allowAntigravityStart }).finally(() => {
+    if (snapshotInFlight === flight) snapshotInFlight = null;
   });
-  return snapshotInFlight;
+  return flight.promise;
 }
 
 function startAntigravityQuotaRefresh() {
@@ -348,8 +351,10 @@ function startAntigravityQuotaRefresh() {
 
 async function refreshRunningAntigravityQuota() {
   if (!appConfig.enableAntigravity) return null;
+  const generation = usageCoordinator.generation;
   const previous = antigravityQuota.getCachedQuota();
   const next = await antigravityQuota.readQuota({ allowStart: false, force: true });
+  if (isQuitting || generation !== usageCoordinator.generation) return null;
   if (!next || next.updatedAt === previous?.updatedAt) return previous;
 
   const cached = snapshotStore.getCached();
@@ -363,7 +368,7 @@ async function refreshRunningAntigravityQuota() {
 
 async function refreshAndPush(options = {}) {
   const snapshot = await readSnapshotOnce(options);
-  mainWindow?.webContents.send("quota:updated", snapshot);
+  if (!snapshot.superseded) mainWindow?.webContents.send("quota:updated", snapshot);
   return snapshot;
 }
 
@@ -371,21 +376,89 @@ function resizeWindow(compact) {
   if (!mainWindow) {
     return false;
   }
-  const size = compact ? COMPACT_SIZE : NORMAL_SIZE;
+  const zoom = 1;
+  const baseSize = compact ? COMPACT_SIZE : NORMAL_SIZE;
+  const size = { width: Math.round(baseSize.width * zoom), height: Math.round(baseSize.height * zoom) };
+  mainWindow.webContents.setZoomFactor(zoom);
   if (mainWindow.isMaximized()) {
     mainWindow.unmaximize();
   }
   mainWindow.setMinimumSize(size.width, size.height);
   mainWindow.setMaximumSize(size.width, size.height);
-  const bounds = mainWindow.getBounds();
-  mainWindow.setBounds({ x: bounds.x, y: bounds.y, width: size.width, height: size.height }, false);
-  mainWindow.setContentSize(size.width, size.height);
+  const bounds = visibleBounds(mainWindow.getBounds(), screen.getAllDisplays(), size.width, size.height);
+  mainWindow.setMinimumSize(Math.min(COMPACT_SIZE.width, bounds.width), Math.min(COMPACT_SIZE.height, bounds.height));
+  mainWindow.setBounds(bounds, false);
+  mainWindow.setContentSize(bounds.width, bounds.height);
   isCompact = Boolean(compact);
   mainWindow.webContents.send("window:compactChanged", isCompact);
   return isCompact;
 }
 
+async function readUsageReport(options) {
+  resolveRange(options.range);
+  const sources = usageCoordinator.enabledLocalSources();
+  const selection = typeof options.selection === "string" ? options.selection : "all";
+  if (options.force) await usageWorkerClient.request("invalidate");
+  const generation = usageCoordinator.generation;
+  const report = await usageWorkerClient.request("report", { range: options.range, selection, sources, enableAntigravity: appConfig.enableAntigravity, priceOverrides: {} });
+  if (generation !== usageCoordinator.generation) throw new Error("Settings changed; retry the report");
+  return report;
+}
+
+let noticeState = {};
+const noticeStatePath = path.join(userDataPath, "notification-state.json");
+try { noticeState = JSON.parse(fs.readFileSync(noticeStatePath, "utf8")); } catch {}
+function publishNotices(snapshot) {
+  if (!app.isReady() || snapshot.error || snapshot.stale) return;
+  const before = JSON.stringify(noticeState);
+  const notices = quotaNotices(snapshot, appConfig.notifications, noticeState);
+  if (before !== JSON.stringify(noticeState)) {
+    try { require("./atomic-json").writeJson(noticeStatePath, noticeState); } catch (error) { console.error(error); }
+  }
+  for (const item of notices) {
+    const english = appConfig.language === "en";
+    new Notification({ title: "AI_bar", body: english
+      ? item.source + " " + item.window + (item.kind === "low" ? " quota low: " : " quota recovered: ") + item.remaining + "%"
+      : item.source + " " + item.window + (item.kind === "low" ? " 额度偏低：" : " 额度已恢复：") + item.remaining + "%" }).show();
+  }
+}
+
 app.whenReady().then(() => {
+  ipcMain.handle("pricing:open", (_event, url) => {
+    if (!["https://openai.com/api/pricing/", "https://www.anthropic.com/pricing", "https://ai.google.dev/gemini-api/docs/pricing", "https://api-docs.deepseek.com/quick_start/pricing"].includes(url)) throw new Error("Unknown pricing source");
+    return shell.openExternal(url);
+  });
+  ipcMain.handle("sources:retry", async (_event, source) => {
+    if (![...usageCoordinator.enabledLocalSources(), ...(appConfig.enableAntigravity ? ["antigravity"] : [])].includes(source)) throw new Error("Source disabled");
+    await usageWorkerClient.request("invalidate");
+    const result = await usageWorkerClient.request(source === "antigravity" ? "antigravityUsage" : "localUsage", { sources: [source], refreshTtl: 0 });
+    const cached = snapshotStore.getCached();
+    if (cached) {
+      const sourceErrors = { ...cached.sourceErrors };
+      if (result.readError) sourceErrors[source] = result.readError; else delete sourceErrors[source];
+      snapshotStore.save({ ...cached, sourceErrors, sourceUpdatedAt: { ...cached.sourceUpdatedAt, ...(!result.readError ? { [source]: Date.now() } : {}) } });
+    }
+    return result;
+  });
+  for (const event of ["display-removed", "display-metrics-changed"]) screen.on(event, () => { if (mainWindow) resizeWindow(isCompact); });
+  ipcMain.handle("sources:health", async () => {
+    const metrics = await usageWorkerClient.request("metrics");
+    return { dataDirectory: userDataPath, fallback: dataLocation.fallback, version: app.getVersion(), sources: sourceHealth(appConfig, snapshotStore.getCached(), { ...metrics, codex: metrics["codex-and-claude"], claude: metrics["codex-and-claude"] }) };
+  });
+  ipcMain.handle("diagnostics:copy", () => { clipboard.writeText(JSON.stringify({ version: app.getVersion(), sources: sourceHealth(appConfig, snapshotStore.getCached()) }, null, 2)); return true; });
+  ipcMain.handle("preferences:update", (_event, preferences) => {
+    const zoom = Math.max(0.8, Math.min(1.3, Number(preferences.zoom) || 1));
+    appConfig = normalizeAppConfig({ ...appConfig, zoom, notifications: preferences.notifications, priceOverrides: preferences.priceOverrides, language: preferences.language });
+    persistAppConfig(configPath, appConfig); if (mainWindow) resizeWindow(isCompact); return appConfig;
+  });
+  ipcMain.handle("tokens:report", (_event, options = {}) => readUsageReport(options));
+  ipcMain.handle("report:export", async (_event, options = {}) => {
+    if (!["csv", "json"].includes(options.format)) throw new Error("Invalid export format");
+    const report = await readUsageReport(options);
+    const result = await dialog.showSaveDialog(mainWindow, { defaultPath: "AI_bar-usage." + options.format, filters: [{ name: options.format.toUpperCase(), extensions: [options.format] }] });
+    if (result.canceled || !result.filePath) return false;
+    await fs.promises.writeFile(result.filePath, serializeReport(report, options.format), "utf8"); return true;
+  });
   ipcMain.handle("quota:cached", () => snapshotStore.getCached());
   // The invoking renderer already receives the returned snapshot; broadcasting
   // it as well would render every refresh twice.
@@ -469,8 +542,9 @@ app.whenReady().then(() => {
   });
 
   codex.on("quota-updated", (quota) => {
+    if (isQuitting || !appConfig.enableCodex) return;
     const cached = snapshotStore.getCached() || {};
-    mainWindow?.webContents.send("quota:updated", {
+    const snapshot = {
       ...cached,
       quota,
       config: appConfig,
@@ -478,19 +552,26 @@ app.whenReady().then(() => {
       error: null,
       errors: [],
       updatedAt: Date.now()
-    });
+    };
+    snapshotStore.save(snapshot);
+    mainWindow?.webContents.send("quota:updated", snapshot);
   });
 
   // Pre-warm only when the source is enabled; disabled sources must stay cold.
   if (appConfig.enableCodex) codex.ensureStarted().catch(() => {});
 
   createWindow();
+  resizeWindow(isCompact);
   createTray();
   registerGlobalShortcuts(appConfig.hotkeys);
   startAntigravityQuotaRefresh();
 });
 
-app.on("before-quit", () => {
+let shutdownComplete = false;
+app.on("before-quit", (event) => {
+  if (shutdownComplete) return;
+  event.preventDefault();
+  if (isQuitting) return;
   isQuitting = true;
   globalShortcut.unregisterAll();
   codex.dispose();
@@ -499,6 +580,15 @@ app.on("before-quit", () => {
   antigravityQuotaTimer = null;
   cancelBackgroundIdle();
   usageCoordinator.stop(true);
+  let timeout;
+  Promise.race([
+    snapshotStore.flush(),
+    new Promise((resolve) => { timeout = setTimeout(resolve, 2_000); })
+  ]).catch((error) => console.error("Snapshot flush failed during shutdown", error)).finally(() => {
+    clearTimeout(timeout);
+    shutdownComplete = true;
+    app.quit();
+  });
 });
 
 app.on("window-all-closed", () => {

@@ -29,12 +29,14 @@ class UsageCoordinator {
     this.cumulativePending = new Map();
   }
 
-  async readLocalUsage(now = Date.now()) {
+  async readLocalUsage(now = Date.now(), onProgress) {
     if (this.cachedLocalUsage && now - this.lastLocalUsageTime < CURRENT_CACHE_TTL) {
-      return this.cachedLocalUsage;
+      return { ...this.cachedLocalUsage, fromCache: true };
     }
     const generation = this.generation;
-    const value = await this.workerClient.request("localUsage", { sources: this.enabledLocalSources() });
+    const value = await this.workerClient.request("localUsage", { sources: this.enabledLocalSources() }, (value) => {
+      if (generation === this.generation) onProgress?.(value);
+    });
     if (generation === this.generation) {
       this.cachedLocalUsage = value;
       this.lastLocalUsageTime = Date.now();
@@ -44,7 +46,7 @@ class UsageCoordinator {
 
   async readAntigravityUsage(now = Date.now()) {
     if (this.cachedAntigravityUsage && now - this.lastAntigravityUsageTime < CURRENT_CACHE_TTL) {
-      return this.cachedAntigravityUsage;
+      return { ...this.cachedAntigravityUsage, fromCache: true };
     }
     const generation = this.generation;
     const value = await this.workerClient.request("antigravityUsage");

@@ -1,4 +1,5 @@
 "use strict";
+const { memoScan } = require("./scan-memo");
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -17,7 +18,7 @@ function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, r
   const catalogSince = catalogDays == null
     ? 0
     : now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
-  const catalogEvents = readRecentEvents({ since: catalogSince, root });
+  const catalogEvents = readRecentEvents({ since: catalogSince, root }).filter((event) => event.t <= now);
   const events = catalogEvents.filter((event) => event.t >= since);
   const modelCatalog = catalogDays == null || catalogDays > days ? summarizeModelUsage(catalogEvents) : summarizeModelUsage(events);
 
@@ -71,7 +72,7 @@ function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, r
 function readDailyTokenHistory({ now = Date.now(), days = 30, root = defaultSessionsRoot(), model = "all" } = {}) {
   const since = now - days * 24 * 60 * 60 * 1000;
   const dailyMap = {};
-  const events = readRecentEvents({ since, root }).filter((e) => matchesModel(e, model));
+  const events = readRecentEvents({ since, root }).filter((e) => e.t <= now && matchesModel(e, model));
   for (const event of events) {
     addUsage(dailyMap, localDateKey(event.t), event);
   }
@@ -92,7 +93,7 @@ function readHourlyTokenHistory({ now = Date.now(), hours = 24, root = defaultSe
     reasoning: 0,
     total: 0
   }));
-  const events = readRecentEvents({ since, root }).filter((e) => matchesModel(e, model));
+  const events = readRecentEvents({ since, root }).filter((e) => e.t <= now && matchesModel(e, model));
   for (const event of events) {
     const index = Math.floor((event.t - firstHour) / hourMs);
     if (index >= 0 && index < buckets.length) addUsageToBucket(buckets[index], event);
@@ -105,7 +106,7 @@ function readTokenHistory({ now = Date.now(), days = 45, hours = 24, root = defa
   const hourMs = 60 * 60 * 1000;
   const dailySince = now - days * dayMs;
   const hourlySince = now - hours * hourMs;
-  const events = readRecentEvents({ since: dailySince, root });
+  const events = readRecentEvents({ since: dailySince, root }).filter((event) => event.t <= now);
 
   const dailyMap = {};
   for (const event of events.filter((e) => matchesModel(e, model))) {
@@ -137,6 +138,10 @@ function readTokenHistory({ now = Date.now(), days = 45, hours = 24, root = defa
 // --- Internal helpers ---
 
 function readRecentEvents({ since, root }) {
+  return memoScan(JSON.stringify(["antigravity", process.env.HISTORY_ACCUMULATOR_PATH, process.env.AI_QUOTA_USER_DATA_PATH, root]), () => scanRecentEvents({ since: 0, root })).filter((event) => event.t >= since);
+}
+
+function scanRecentEvents({ since, root }) {
   const roots = Array.isArray(root) ? root : [root];
   const transcriptPaths = [];
   

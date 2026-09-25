@@ -162,7 +162,7 @@ test("parses OpenCode session lists and exact exported assistant usage", () => {
   }]);
 });
 
-test("reads OpenCode usage through its read-only session export commands", (t) => {
+test("reads OpenCode usage through its read-only session export commands", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bar-opencode-"));
   const previousUserData = process.env.AI_QUOTA_USER_DATA_PATH;
   process.env.AI_QUOTA_USER_DATA_PATH = dir;
@@ -190,7 +190,7 @@ test("reads OpenCode usage through its read-only session export commands", (t) =
       })
     };
   };
-  const usage = readOpenCodeTokenUsage({ now: now + 1_000, binary: "opencode-test", runner });
+  const usage = await readOpenCodeTokenUsage({ now: now + 1_000, binary: "opencode-test", runner });
   assert.equal(usage.total, 65);
   assert.equal(usage.sessions, 1);
   assert.deepEqual(calls, [
@@ -200,7 +200,7 @@ test("reads OpenCode usage through its read-only session export commands", (t) =
   const cache = fs.readFileSync(path.join(dir, "opencode_usage_cache.json"), "utf8");
   assert.doesNotMatch(cache, /private transcript text/);
   sessionExists = false;
-  const retained = readOpenCodeTokenUsage({ now: now + 1_000, binary: "opencode-test", runner });
+  const retained = await readOpenCodeTokenUsage({ now: now + 1_000, binary: "opencode-test", runner, refreshTtl: 0 });
   assert.equal(retained.total, 65);
   assert.equal(retained.sessions, 1);
   assert.deepEqual(calls.at(-1), ["session", "list", "--format", "json"]);

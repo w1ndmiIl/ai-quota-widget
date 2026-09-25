@@ -1,0 +1,10 @@
+"use strict";
+const path = require("node:path");
+const { spawn } = require("node:child_process");
+process.env.electron_config_cache ||= path.resolve(__dirname, "../.cache/electron");
+process.env.ELECTRON_CACHE ||= process.env.electron_config_cache;
+const electron = require("electron");
+const child = spawn(electron, process.argv.slice(2).length ? process.argv.slice(2) : ["."], { stdio: "inherit", windowsHide: true });
+child.on("error", (error) => { console.error(error); process.exitCode = 1; });
+child.on("exit", (code) => { process.exitCode = code ?? 1; });
+process.on("SIGINT", () => child.kill());

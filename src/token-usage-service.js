@@ -3,15 +3,17 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { scanFilesIncrementally } = require("./incremental-scan-engine");
+const { scanFilesIncrementally, getCachePath } = require("./incremental-scan-engine");
+const { readAppendedEvents } = require("./append-jsonl");
 const { addSettledUsageCost } = require("./usage-cost-settlement");
+let recentEventCache = null;
 
-function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, root = defaultSessionsRoot(), sources = null } = {}) {
+function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, root = defaultSessionsRoot(), sources = null, eventCacheTtl = 0 } = {}) {
   const since = now - days * 24 * 60 * 60 * 1000;
   const catalogSince = catalogDays == null
     ? 0
     : now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
-  const recent = readRecentUsageEvents({ since: catalogSince, root });
+  const recent = readRecentUsageEvents({ since: catalogSince, root, eventCacheTtl });
   const sessions = new Set(recent.events.map((event) => event.file));
   const eventFiles = new Set(recent.events.map((usage) => usage.file));
   const allUsages = [
@@ -19,8 +21,8 @@ function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, r
     ...recent.fallbacks.filter((usage) => !eventFiles.has(usage.file))
   ];
   const catalogUsages = Array.isArray(sources)
-    ? allUsages.filter((usage) => sources.includes(usage.source))
-    : allUsages;
+    ? allUsages.filter((usage) => usage.t <= now && sources.includes(usage.source))
+    : allUsages.filter((usage) => usage.t <= now);
   const usages = catalogUsages.filter((usage) => usage.t >= since);
 
   const totals = usages.reduce(
@@ -111,7 +113,13 @@ function readHourlyTokenHistory({ now = Date.now(), hours = 24, root = defaultSe
   return buckets;
 }
 
-function readRecentUsageEvents({ since, root }) {
+function readRecentUsageEvents({ since, root, eventCacheTtl = 0 }) {
+  const key = JSON.stringify([getCachePath(), root]);
+  if (eventCacheTtl > 0 && recentEventCache?.key === key && Date.now() - recentEventCache.at < eventCacheTtl) {
+    return filterRecentEvents(recentEventCache.value, since);
+  }
+  const requestedSince = since;
+  if (eventCacheTtl > 0) since = 0;
   const fileEntries = listJsonlFiles(root);
   const filePaths = fileEntries.map(({ file }) => file);
   const sourceByFile = new Map(fileEntries.map(({ file, source }) => [file, source]));
@@ -123,7 +131,7 @@ function readRecentUsageEvents({ since, root }) {
       const latest = readLatestUsage(file);
       fallback = latest ? {
         ...latest,
-        t: safeStat(file)?.mtimeMs ?? 0,
+        t: Math.floor(safeStat(file)?.mtimeMs ?? 0),
         ...(source ? { source } : {})
       } : null;
     }
@@ -160,7 +168,17 @@ function readRecentUsageEvents({ since, root }) {
     }
   }
 
-  return { events, fallbacks };
+  const value = { events, fallbacks };
+  if (eventCacheTtl > 0) recentEventCache = { key, at: Date.now(), value };
+  else recentEventCache = null;
+  return filterRecentEvents(value, requestedSince);
+}
+
+function filterRecentEvents(value, since) {
+  return {
+    events: value.events.filter((event) => event.t >= since),
+    fallbacks: value.fallbacks.filter((event) => event.t >= since)
+  };
 }
 
 function usageEventSignature(file, event) {
@@ -181,35 +199,20 @@ function usageEventSignature(file, event) {
 
 function matchesModel(usage, model, source = null) {
   const modelMatches = model === "all" || (usage.model ?? "unknown") === model;
-  const sourceMatches = !source || source === "all" || usage.source === source;
+  const sourceMatches = Array.isArray(source) ? source.includes(usage.source) : !source || source === "all" || usage.source === source;
   return modelMatches && sourceMatches;
 }
 
 function readUsageEvents(file, source = null) {
-  const events = [];
-  let currentModel = null;
-  const content = fs.readFileSync(file, "utf8");
-  const seenMessageIds = new Set();
-  for (const line of content.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    try {
-      const item = JSON.parse(line);
-      currentModel = readModelName(item) ?? currentModel;
-      const timestamp = Date.parse(item?.timestamp);
-      const usage = item?.payload?.info?.last_token_usage ?? item?.message?.usage;
-      const messageId = item?.message?.id;
-      if (Number.isFinite(timestamp) && usage) {
-        if (messageId) {
-          if (seenMessageIds.has(messageId)) continue;
-          seenMessageIds.add(messageId);
-        }
-        events.push({ t: timestamp, model: currentModel ?? "unknown", ...(source ? { source } : {}), ...normalizeUsage(usage) });
-      }
-    } catch {
-      // Ignore partial or non-JSON lines.
-    }
-  }
-  return events;
+  return readAppendedEvents(file, (item, state) => {
+    state.model = readModelName(item) ?? state.model;
+    const timestamp = Date.parse(item?.timestamp);
+    const usage = item?.payload?.info?.last_token_usage ?? item?.message?.usage;
+    const id = item?.message?.id;
+    if (!Number.isFinite(timestamp) || !usage || id && state.ids.has(id)) return null;
+    if (id) state.ids.add(id);
+    return { t: timestamp, model: state.model ?? "unknown", ...(source ? { source } : {}), ...normalizeUsage(usage) };
+  });
 }
 
 function summarizeModelUsage(usages) {
@@ -340,12 +343,13 @@ function readNumber(value, fallback) {
   return fallback;
 }
 
-function readTokenHistory({ now = Date.now(), days = 45, hours = 24, root = defaultSessionsRoot(), model = "all", source = null } = {}) {
+function readTokenHistory({ now = Date.now(), days = 45, hours = 24, root = defaultSessionsRoot(), model = "all", source = null, eventCacheTtl = 0 } = {}) {
   const dayMs = 24 * 60 * 60 * 1000;
   const hourMs = 60 * 60 * 1000;
   const dailySince = now - days * dayMs;
   const hourlySince = now - hours * hourMs;
-  const recent = readRecentUsageEvents({ since: dailySince, root });
+  const rawRecent = readRecentUsageEvents({ since: dailySince, root, eventCacheTtl });
+  const recent = { events: rawRecent.events.filter((event) => event.t <= now), fallbacks: rawRecent.fallbacks.filter((event) => event.t <= now) };
 
   const dailyMap = {};
   for (const event of recent.events.filter((event) => matchesModel(event, model, source))) {
@@ -393,6 +397,7 @@ function defaultSessionsRoot() {
 }
 
 module.exports = {
+  invalidateEventCache: () => { recentEventCache = null; },
   readLocalTokenUsage,
   readLatestUsage,
   readUsageEvents,
