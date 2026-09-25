@@ -13,7 +13,7 @@ function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, r
   const catalogSince = catalogDays == null
     ? 0
     : now - Math.max(days, catalogDays) * 24 * 60 * 60 * 1000;
-  const recent = readRecentUsageEvents({ since: catalogSince, root, eventCacheTtl });
+  const recent = readRecentUsageEvents({ since: catalogSince, root, eventCacheTtl, cutoffNow: now });
   const sessions = new Set(recent.events.map((event) => event.file));
   const eventFiles = new Set(recent.events.map((usage) => usage.file));
   const allUsages = [
@@ -76,7 +76,7 @@ function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, r
 function readDailyTokenHistory({ now = Date.now(), days = 30, root = defaultSessionsRoot(), model = "all", source = null } = {}) {
   const since = now - days * 24 * 60 * 60 * 1000;
   const dailyMap = {};
-  const recent = readRecentUsageEvents({ since, root });
+  const recent = readRecentUsageEvents({ since, root, cutoffNow: now });
   for (const event of recent.events.filter((event) => matchesModel(event, model, source))) {
     addUsage(dailyMap, localDateKey(event.t), event);
   }
@@ -101,7 +101,7 @@ function readHourlyTokenHistory({ now = Date.now(), hours = 24, root = defaultSe
     reasoning: 0,
     total: 0
   }));
-  const recent = readRecentUsageEvents({ since, root });
+  const recent = readRecentUsageEvents({ since, root, cutoffNow: now });
   for (const event of recent.events.filter((event) => matchesModel(event, model, source))) {
     const index = Math.floor((event.t - firstHour) / hourMs);
     if (index >= 0 && index < buckets.length) addUsageToBucket(buckets[index], event);
@@ -113,7 +113,7 @@ function readHourlyTokenHistory({ now = Date.now(), hours = 24, root = defaultSe
   return buckets;
 }
 
-function readRecentUsageEvents({ since, root, eventCacheTtl = 0 }) {
+function readRecentUsageEvents({ since, root, eventCacheTtl = 0, cutoffNow = Date.now() }) {
   const key = JSON.stringify([getCachePath(), root]);
   if (eventCacheTtl > 0 && recentEventCache?.key === key && Date.now() - recentEventCache.at < eventCacheTtl) {
     return filterRecentEvents(recentEventCache.value, since);
@@ -156,10 +156,15 @@ function readRecentUsageEvents({ since, root, eventCacheTtl = 0 }) {
     } else if (data.fallback) {
       const stat = safeStat(file);
       const mtimeMs = stat?.mtimeMs ?? 0;
-      const fallbackTime = mtimeMs || data.fallback.t || 0;
+      const rawTime = mtimeMs || data.fallback.t || 0;
+      // Windows may timestamp a just-written file a little ahead of the JS
+      // clock. Clamp only live reads, preserving historical range boundaries.
+      const skew = rawTime - cutoffNow;
+      const fallbackTime = Math.abs(Date.now() - cutoffNow) < 60_000 && skew > 0 && skew <= 5_000
+        ? cutoffNow : rawTime;
       if (fallbackTime >= since) {
         const source = data.fallback.source ?? sourceByFile.get(file);
-        const fallback = { file, t: fallbackTime, model: "unknown", ...(source ? { source } : {}), ...data.fallback };
+        const fallback = { file, model: "unknown", ...(source ? { source } : {}), ...data.fallback, t: fallbackTime };
         const signature = usageEventSignature(file, fallback);
         if (seenFallbacks.has(signature)) continue;
         seenFallbacks.add(signature);
@@ -348,7 +353,7 @@ function readTokenHistory({ now = Date.now(), days = 45, hours = 24, root = defa
   const hourMs = 60 * 60 * 1000;
   const dailySince = now - days * dayMs;
   const hourlySince = now - hours * hourMs;
-  const rawRecent = readRecentUsageEvents({ since: dailySince, root, eventCacheTtl });
+  const rawRecent = readRecentUsageEvents({ since: dailySince, root, eventCacheTtl, cutoffNow: now });
   const recent = { events: rawRecent.events.filter((event) => event.t <= now), fallbacks: rawRecent.fallbacks.filter((event) => event.t <= now) };
 
   const dailyMap = {};

@@ -15,6 +15,11 @@ if (check.status !== 0) process.exit(check.status || 1);
 const smoke = spawnSync(process.execPath, [path.join(__dirname, "run-electron.cjs"), "scripts/smoke-renderer.cjs"], { cwd: projectRoot, stdio: "inherit" });
 if (smoke.status !== 0) process.exit(smoke.status || 1);
 const args = process.argv.slice(2);
+// Packaging and publishing are separate steps. electron-builder otherwise
+// attempts an automatic GitHub publish on CI hosts without a release token.
+if (!args.includes("--publish") && !args.some((arg) => arg.startsWith("--publish="))) {
+  args.push("--publish", "never");
+}
 const outputOption = args.find((arg) => arg.startsWith("--config.directories.output="));
 const outputRoot = path.resolve(
   projectRoot,
