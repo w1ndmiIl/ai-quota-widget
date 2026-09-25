@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
 const { normalizeCodexQuota } = require("./quota-normalizer");
+const { writeJson } = require("./atomic-json");
 
 class CodexService extends EventEmitter {
   constructor() {
@@ -49,7 +50,7 @@ class CodexService extends EventEmitter {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      fs.writeFileSync(this.cacheFilePath, JSON.stringify(snapshot), "utf8");
+      writeJson(this.cacheFilePath, snapshot);
     } catch (e) {}
   }
 
@@ -145,7 +146,7 @@ class CodexService extends EventEmitter {
         clientInfo: {
           name: "ai_quota_widget",
           title: "AI Quota Widget",
-          version: "1.0.0"
+          version: require("../package.json").version
         },
         capabilities: {
           experimentalApi: true

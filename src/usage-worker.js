@@ -1,6 +1,11 @@
 "use strict";
 
 const { parentPort } = require("node:worker_threads");
+if (parentPort) process.env.AI_QUOTA_PARTITION_LEDGER = "1";
+const { configureScanCache } = require("./scan-memo");
+const { resolveRange } = require("./usage-report");
+const TokenPricing = require("./renderer/token-pricing");
+configureScanCache(15_000);
 const {
   readLocalTokenUsage,
   readTokenHistory
@@ -26,31 +31,38 @@ function readUsageWithModelCatalog(reader, payload = {}) {
   return reader({ ...payload, catalogDays: null });
 }
 
-function readOpenCodeUsageWithModelCatalog(payload = {}) {
-  return readOpenCodeTokenUsage({ days: payload.days || 1, catalogDays: null });
+function readOpenCodeUsageWithModelCatalog(payload = {}, onProgress) {
+  return readOpenCodeTokenUsage({ ...payload, days: payload.days || 1, catalogDays: null, onProgress });
 }
 
 function localSources(payload = {}) {
   return Array.isArray(payload.sources) ? payload.sources : ["codex", "claude", "opencode", "gemini", "cline"];
 }
 
-function readCombinedLocalUsage(payload = {}) {
+async function readCombinedLocalUsage(payload = {}, onProgress) {
   const sources = localSources(payload);
   const usages = [];
   const sessionSources = sources.filter((source) => source === "codex" || source === "claude");
-  if (sessionSources.length) usages.push(readUsageWithModelCatalog(readLocalTokenUsage, { ...payload, sources: sessionSources }));
-  if (sources.includes("opencode")) usages.push(readOpenCodeUsageWithModelCatalog(payload));
+  if (sessionSources.length) usages.push(readUsageWithModelCatalog(readLocalTokenUsage, { ...payload, sources: sessionSources, eventCacheTtl: 15_000 }));
   if (sources.includes("gemini")) usages.push(readUsageWithModelCatalog(readGeminiTokenUsage, payload));
   if (sources.includes("cline")) usages.push(readUsageWithModelCatalog(readClineTokenUsage, payload));
+  const metrics = require("./incremental-scan-engine").getScanMetrics();
+  for (const usage of usages) {
+    const namespace = usage.source === "localSessions" ? "codex-and-claude" : usage.source;
+    if (metrics[namespace]?.failures) usage.readError = `${namespace}: ${metrics[namespace].failures} session files could not be read; using retained data`;
+  }
+  if (sources.includes("opencode")) usages.push(await readOpenCodeUsageWithModelCatalog(payload,
+    (usage) => onProgress?.(mergeUsageSummaries([...usages, usage]))));
   return mergeUsageSummaries(usages);
 }
 
-function readCombinedLocalHistory(payload = {}) {
+async function readCombinedLocalHistory(payload = {}) {
   const sources = localSources(payload);
   const histories = [];
+  const sessionSources = sources.filter((source) => source === "codex" || source === "claude");
+  if (sessionSources.length) histories.push(readTokenHistory({ ...payload, source: sessionSources, eventCacheTtl: 15_000 }));
   for (const source of sources) {
-    if (source === "codex" || source === "claude") histories.push(readTokenHistory({ ...payload, source }));
-    if (source === "opencode") histories.push(readOpenCodeTokenHistory(payload));
+    if (source === "opencode") histories.push(await readOpenCodeTokenHistory(payload));
     if (source === "gemini") histories.push(readGeminiTokenHistory(payload));
     if (source === "cline") histories.push(readClineTokenHistory(payload));
   }
@@ -90,6 +102,9 @@ function mergeUsageSummaries(usages) {
     modelCatalogRange: "all",
     sessions,
     error: hasData ? null : "No enabled local agent usage found"
+    , readError: usages.map((usage) => usage?.readError).filter(Boolean).join("; ") || null,
+    partial: usages.some((usage) => usage?.partial)
+    , sourceErrors: Object.fromEntries(usages.filter((usage) => usage?.readError).map((usage) => [usage.source, usage.readError]))
   };
 }
 
@@ -136,7 +151,7 @@ function parseSelection(selection = "all") {
   return { source: null, model: selection };
 }
 
-function readCumulative({ selection = "all", model, source = null, enableCodex = true, enableClaudeCode = true, enableOpenCode = true, enableGeminiCli = true, enableCline = true, enableAntigravity = true }) {
+async function readCumulative({ selection = "all", model, source = null, enableCodex = true, enableClaudeCode = true, enableOpenCode = true, enableGeminiCli = true, enableCline = true, enableAntigravity = true }) {
   const selected = selection !== "all" || model == null
     ? parseSelection(selection)
     : { model, source };
@@ -170,9 +185,11 @@ function readCumulative({ selection = "all", model, source = null, enableCodex =
   const wantsOpenCode = !selected.source || selected.source === "opencode";
   const wantsGemini = !selected.source || selected.source === "gemini";
   const wantsCline = !selected.source || selected.source === "cline";
-  if (enableCodex && wantsCodex) addUsage(readLocalTokenUsage({ days: 9999, sources: ["codex"] }), true, "codex");
-  if (enableClaudeCode && wantsClaude) addUsage(readLocalTokenUsage({ days: 9999, sources: ["claude"] }), true, "claude");
-  if (enableOpenCode && wantsOpenCode) addUsage(readOpenCodeTokenUsage({ days: null, catalogDays: null }), true, "opencode");
+  const sessionSources = [];
+  if (enableCodex && wantsCodex) sessionSources.push("codex");
+  if (enableClaudeCode && wantsClaude) sessionSources.push("claude");
+  if (sessionSources.length) addUsage(readLocalTokenUsage({ days: 9999, sources: sessionSources, eventCacheTtl: 15_000 }), true);
+  if (enableOpenCode && wantsOpenCode) addUsage(await readOpenCodeTokenUsage({ days: null, catalogDays: null }), true, "opencode");
   if (enableGeminiCli && wantsGemini) addUsage(readGeminiTokenUsage({ days: 9999 }), true, "gemini");
   if (enableCline && wantsCline) addUsage(readClineTokenUsage({ days: 9999 }), true, "cline");
   if (enableAntigravity && wantsAntigravity) addUsage(readAntigravityUsage({ days: 9999 }), false, "antigravity");
@@ -184,10 +201,53 @@ function readCumulative({ selection = "all", model, source = null, enableCodex =
   };
 }
 
-function execute(operation, payload = {}) {
+async function readReport(payload) {
+  const range = resolveRange(payload.range, payload.now);
+  const options = { now: range.end, days: range.days, sources: localSources(payload), hours: Math.min(24, range.days * 24) };
+  const usages = [await readCombinedLocalUsage(options)];
+  const histories = [await readCombinedLocalHistory({ ...options, model: "all", skipRefresh: true })];
+  if (payload.enableAntigravity) {
+    const usage = readAntigravityUsage({ ...options, catalogDays: null });
+    usage.modelUsage = (usage.modelUsage || []).map((model) => ({ ...model, source: "antigravity" }));
+    usage.modelCatalog = (usage.modelCatalog || []).map((model) => ({ ...model, source: "antigravity" }));
+    usages.push(usage);
+    histories.push(readAntigravityHistory({ ...options, model: "all" }));
+  }
+  const models = usages.flatMap((usage) => usage?.modelUsage || []).sort((a,b) => b.total-a.total);
+  const catalog = usages.flatMap((usage) => usage?.modelCatalog || usage?.modelUsage || []).sort((a,b) => b.total-a.total);
+  for (const model of models) {
+    const override = payload.priceOverrides?.[model.model];
+    if (!override || ["input", "cached", "cacheWrite", "output"].some((key) => !Number.isFinite(override[key]) || override[key] < 0)) continue;
+    const cost = TokenPricing.estimateUsageCost(model, model.model, undefined, override);
+    Object.assign(model, { estimatedUsd: cost.usd, estimatedMaxUsd: cost.maxUsd, pricedTokens: cost.tokens, unpricedTokens: 0, unknownModels: [], variableModels: [], pricingSettled: true, customPrice: true });
+  }
+  const selected = parseSelection(payload.selection || "all");
+  const selectedModels = models.filter((model) => (!selected.source || model.source === selected.source || selected.source === "antigravity" && !model.source) && (selected.model === "all" || model.model === selected.model));
+  let history;
+  if (!selected.source && selected.model === "all") history = mergeHistories(histories);
+  else if (selected.source === "antigravity") history = payload.enableAntigravity ? readAntigravityHistory({ ...options, model: selected.model }) : { daily: {}, hourly: [] };
+  else history = await readCombinedLocalHistory({ ...options, sources: selected.source ? options.sources.filter((source) => source === selected.source) : options.sources, model: selected.model, skipRefresh: true });
+  let contextHistory = history;
+  if (["24h", "today"].includes(range.preset)) {
+    const contextOptions = { ...options, days: 45, model: selected.model, sources: selected.source ? options.sources.filter((source) => source === selected.source) : options.sources, skipRefresh: true };
+    const contexts = [await readCombinedLocalHistory(contextOptions)];
+    if (payload.enableAntigravity && (!selected.source || selected.source === "antigravity")) contexts.push(readAntigravityHistory(contextOptions));
+    contextHistory = mergeHistories(contexts);
+  }
+  return { range, models: selectedModels, catalog, history, contextHistory, readError: usages.map((usage) => usage?.readError).filter(Boolean).join("; "), partial: usages.some((usage) => usage?.partial) };
+}
+
+function execute(operation, payload = {}, onProgress) {
   switch (operation) {
+    case "cancel": require("./opencode-token-service").cancelReads(); return true;
+    case "metrics": return require("./incremental-scan-engine").getScanMetrics();
+    case "report": return readReport(payload);
+    case "invalidate":
+      configureScanCache(0); configureScanCache(15_000);
+      require("./token-usage-service").invalidateEventCache();
+      require("./opencode-token-service").invalidateCache(); return true;
     case "localUsage":
-      return readCombinedLocalUsage(payload);
+      return readCombinedLocalUsage(payload, onProgress);
     case "antigravityUsage":
       return readUsageWithModelCatalog(readAntigravityUsage);
     case "localHistory":
@@ -201,10 +261,13 @@ function execute(operation, payload = {}) {
   }
 }
 
-parentPort.on("message", ({ id, operation, payload }) => {
+parentPort?.on("message", async ({ id, operation, payload }) => {
   try {
-    parentPort.postMessage({ id, result: execute(operation, payload) });
+    const result = await execute(operation, payload, (progress) => parentPort.postMessage({ id, progress }));
+    parentPort.postMessage({ id, result });
   } catch (error) {
     parentPort.postMessage({ id, error: error?.message || String(error) });
   }
 });
+
+module.exports = { execute };

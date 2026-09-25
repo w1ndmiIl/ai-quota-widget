@@ -21,11 +21,11 @@ class UsageWorkerClient {
     this.spawnCount = 0;
   }
 
-  request(operation, payload = {}) {
+  request(operation, payload = {}, onProgress) {
     const worker = this.getWorker();
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve, reject, onProgress });
       worker.postMessage({ id, operation, payload });
     });
   }
@@ -37,9 +37,13 @@ class UsageWorkerClient {
     const worker = this.createWorker(this.workerPath);
     this.spawnCount += 1;
     worker.unref?.();
-    worker.on("message", ({ id, result, error }) => {
+    worker.on("message", ({ id, result, error, progress }) => {
       const pending = this.pending.get(id);
       if (!pending) return;
+      if (progress !== undefined) {
+        pending.onProgress?.(progress);
+        return;
+      }
       this.pending.delete(id);
       if (error) pending.reject(new Error(error));
       else pending.resolve(result);
@@ -78,7 +82,10 @@ class UsageWorkerClient {
     if (!this.worker || (this.pending.size && !force)) return false;
     const worker = this.worker;
     this.worker = null;
-    worker.terminate();
+    if (force && this.pending.size) {
+      worker.postMessage({ id: 0, operation: "cancel" });
+      setTimeout(() => worker.terminate(), 150).unref?.();
+    } else worker.terminate();
     if (force) this.rejectPending(new Error("Usage worker stopped"));
     return true;
   }

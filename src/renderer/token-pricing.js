@@ -182,8 +182,8 @@
     return day >= 1 && day <= 5 && ((hour >= 1 && hour < 4) || (hour >= 6 && hour < 10));
   }
 
-  function estimateUsageCost(usage, model = usage?.model, at = usage?.t) {
-    const modelPrice = findModelPrice(model, at);
+  function estimateUsageCost(usage, model = usage?.model, at = usage?.t, override = null) {
+    const modelPrice = override ? { ...override, label: model, maxInput: override.input, maxCached: override.cached, maxCacheWrite: override.cacheWrite, maxOutput: override.output } : findModelPrice(model, at);
     if (!modelPrice) return null;
 
     const input = tokenNumber(usage?.input);

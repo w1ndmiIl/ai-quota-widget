@@ -110,7 +110,7 @@ test("loads pure model aggregation before the renderer and memoizes menu rebuild
   const renderer = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "renderer.js"), "utf8");
   assert.ok(html.indexOf('src="./model-usage.js"') < html.indexOf('src="./renderer.js"'));
   assert.ok(html.indexOf('src="./ui-interactions.js"') < html.indexOf('src="./renderer.js"'));
-  assert.match(renderer, /if \(nextSignature === modelMenuSignature\) return;/);
+  assert.match(renderer, /if \(nextSignature === modelMenuSignature\) \{/);
   assert.match(renderer, /window\.addEventListener\("resize", scheduleToggleSliderUpdate\)/);
   assert.match(renderer, /requestAnimationFrame\(\(\) =>/);
   assert.match(renderer, /const expandedModelSources = new Set\(MODEL_SOURCES\.map\(\(source\) => source\.key\)\)/);

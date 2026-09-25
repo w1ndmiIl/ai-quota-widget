@@ -336,6 +336,30 @@ test("calculates cache hit rate from the cached portion of input tokens", (t) =>
   assert.equal(usage.cacheHitRate, 75);
 });
 
+test("a slightly future Windows file timestamp does not hide untimestamped usage", (t) => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bar-mtime-"));
+  const previousCache = process.env.HISTORY_ACCUMULATOR_PATH;
+  process.env.HISTORY_ACCUMULATOR_PATH = path.join(dir, "ledger.json");
+  t.after(() => {
+    if (previousCache === undefined) delete process.env.HISTORY_ACCUMULATOR_PATH;
+    else process.env.HISTORY_ACCUMULATOR_PATH = previousCache;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const file = path.join(dir, "session.jsonl");
+  fs.writeFileSync(file, JSON.stringify({ payload: { info: { total_token_usage: {
+    input_tokens: 100, cached_input_tokens: 75, output_tokens: 20, total_tokens: 120
+  } } } }));
+  const now = Date.now();
+  const future = new Date(now + 1_000);
+  fs.utimesSync(file, future, future);
+  const { readLocalTokenUsage } = require("../src/token-usage-service");
+  assert.equal(readLocalTokenUsage({ root: dir, now }).cacheHitRate, 75);
+  assert.equal(readLocalTokenUsage({ root: dir, now: now - 86_400_000 }).total, null);
+});
+
 test("groups token increments by event time instead of file modification time", (t) => {
   const fs = require("node:fs");
   const os = require("node:os");

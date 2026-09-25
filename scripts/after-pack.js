@@ -15,7 +15,7 @@ exports.default = async function afterPack(context) {
   if (context.electronPlatformName === "win32") {
     const { rcedit } = await import("rcedit");
     const appInfo = context.packager.appInfo;
-    const executable = path.join(context.appOutDir, `${appInfo.productFilename}.exe`);
+    const executable = path.join(context.appOutDir, `${context.packager.config.win?.executableName || appInfo.productFilename}.exe`);
     await rcedit(executable, {
       "file-version": appInfo.version,
       "product-version": appInfo.version,
