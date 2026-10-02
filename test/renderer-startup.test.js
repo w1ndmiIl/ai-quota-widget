@@ -27,7 +27,7 @@ test("routes runtime dashboard labels through the translation dictionary", () =>
     'set("trendTitle", "trendTitle")',
     'set("heatTitle", "heatTitle")',
     'label: t("allModels")',
-    'titleText = t("cumulativeToken")',
+    't(stats.usageAccuracy',
     't("unlimited")'
   ]) {
     assert.ok(source.includes(requiredTranslation), `missing translation wiring: ${requiredTranslation}`);
@@ -73,12 +73,12 @@ test("switches the quota panel to Gemini-only Antigravity limits without reset c
   assert.match(renderer, /button\.addEventListener\("click", \(\) => setQuotaMode\(button\.dataset\.mode\)\)/);
   assert.match(renderer, /const antigravityMode = quotaMode === "antigravity"/);
   assert.doesNotMatch(renderer, /const antigravityMode = parseModelSelection\(selectedModel\)\.source/);
-  assert.match(renderer, /selectableModelSources\.add\("antigravity"\)/);
+  assert.match(renderer, /selectableModelSources = new Set\(mergedModels\.map/);
   assert.match(main, /new AntigravityQuotaService\(\{ userDataPath \}\)/);
-  assert.match(main, /antigravityQuota\.readQuota\(\{[\s\S]*?allowStart: allowAntigravityStart/);
+  assert.match(main, /antigravityQuota\.readQuota\(\{[\s\S]*?force: manual/);
   assert.match(main, /options\?\.manual === true/);
   assert.match(main, /ANTIGRAVITY_QUOTA_REFRESH_MS = 5 \* 60_000/);
-  assert.match(main, /antigravityQuota\.readQuota\(\{ allowStart: false, force: true \}\)/);
+  assert.match(main, /antigravityQuota\.readQuota\(\{ force: true \}\)/);
   assert.match(preload, /refresh: \(options\) => ipcRenderer\.invoke\("quota:refresh", options\)/);
   assert.match(renderer, /refreshButton\.addEventListener\("click", \(\) => refresh\(\{ manual: true \}\)\)/);
   assert.match(renderer, /if \(!document\.hidden\) refresh\(\)/);
@@ -88,6 +88,7 @@ test("wires popular agent sources through settings and model filtering", () => {
   const html = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "index.html"), "utf8");
   const renderer = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "renderer.js"), "utf8");
   const main = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  const config = fs.readFileSync(path.join(__dirname, "..", "src", "app-config-store.js"), "utf8");
 
   for (const id of ["cfgOpenCode", "cfgGeminiCli", "cfgCline", "labelOpenCode", "labelGeminiCli", "labelCline"]) {
     assert.match(html, new RegExp(`id="${id}"`));
@@ -98,8 +99,9 @@ test("wires popular agent sources through settings and model filtering", () => {
   assert.ok(openCodeIndex < geminiIndex && geminiIndex < clineIndex);
   for (const setting of ["enableOpenCode", "enableGeminiCli", "enableCline"]) {
     assert.match(renderer, new RegExp(setting));
-    assert.match(main, new RegExp(setting));
+    assert.match(config, new RegExp(setting));
   }
+  assert.match(main, /usageCoordinator\.enabledLocalSources\(\)/);
   assert.match(renderer, /labelOpenCode: "OpenCode Local Sessions"/);
   assert.match(renderer, /labelGeminiCli: "Gemini CLI Local Sessions"/);
   assert.match(renderer, /labelCline: "Cline Local Logs"/);
@@ -111,14 +113,12 @@ test("loads pure model aggregation before the renderer and memoizes menu rebuild
   assert.ok(html.indexOf('src="./model-usage.js"') < html.indexOf('src="./renderer.js"'));
   assert.ok(html.indexOf('src="./ui-interactions.js"') < html.indexOf('src="./renderer.js"'));
   assert.match(renderer, /if \(nextSignature === modelMenuSignature\) \{/);
-  assert.match(renderer, /window\.addEventListener\("resize", scheduleToggleSliderUpdate\)/);
   assert.match(renderer, /requestAnimationFrame\(\(\) =>/);
   assert.match(renderer, /const expandedModelSources = new Set\(MODEL_SOURCES\.map\(\(source\) => source\.key\)\)/);
   assert.match(renderer, /usage\.textContent = formatToken\(item\.total\)/);
   assert.match(renderer, /kind: "model",\s*total: item\.total/);
   const worker = fs.readFileSync(path.join(__dirname, "..", "src", "usage-worker.js"), "utf8");
   assert.match(worker, /catalogDays: null/);
-  assert.match(worker, /readOpenCodeTokenUsage\(\{ days: null, catalogDays: null \}\)/);
   assert.match(worker, /modelCatalogRange: "all"/);
 });
 

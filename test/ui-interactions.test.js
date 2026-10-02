@@ -60,10 +60,10 @@ test("keeps modal, live-status, model-picker and heatmap interaction helpers wir
   assert.match(styles, /\.setting-choice\.active \{[\s\S]*?background: rgba\(255, 255, 255, 0\.96\);/);
   assert.match(styles, /\.quota-side \.reset-row \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\) 72px;/);
   assert.match(styles, /\.ring \{[\s\S]*?background: rgba\(255, 255, 255, 0\.54\);[\s\S]*?box-shadow: 0 12px 28px/);
-  assert.match(styles, /\.ring-track-outer,[\s\S]*?\.ring-arc-short \{\s*stroke-width: 10;/);
+  assert.match(styles, /\.ring-track-outer,[\s\S]*?\.ring-arc-short \{\s*stroke-width: 9;/);
   assert.match(styles, /@keyframes ring-float/);
-  assert.match(styles, /\.ring-core \{[\s\S]*?align-content: center;[\s\S]*?gap: 8px;/);
-  assert.match(styles, /\.ring-core span \{[\s\S]*?align-items: baseline;[\s\S]*?font-variant-numeric: tabular-nums;/);
+  assert.match(styles, /\.ring-core \{[\s\S]*?align-content: center;/);
+  assert.match(styles, /\.ring-core \.ring-value \{[\s\S]*?align-items: center;[\s\S]*?font-variant-numeric: tabular-nums;/);
   assert.match(renderer, /resetSub: "恢复 5小时与周限额"/);
   assert.match(styles, /\.model-picker-models \{[\s\S]*?max-height: 90px;[\s\S]*?overflow-y: auto;/);
   assert.match(styles, /\.model-picker-models::-webkit-scrollbar \{\s*width: 5px;/);

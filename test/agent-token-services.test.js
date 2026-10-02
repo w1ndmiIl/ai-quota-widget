@@ -16,7 +16,7 @@ const {
 const {
   parseSessionExport,
   parseSessionList,
-  parseStatsOutput,
+
   readOpenCodeTokenUsage
 } = require("../src/opencode-token-service");
 
@@ -204,43 +204,4 @@ test("reads OpenCode usage through its read-only session export commands", async
   assert.equal(retained.total, 65);
   assert.equal(retained.sessions, 1);
   assert.deepEqual(calls.at(-1), ["session", "list", "--format", "json"]);
-});
-
-test("parses official OpenCode stats output for fast dashboard totals", () => {
-  const output = [
-    "┌────────────────────────────────────────────────────────┐",
-    "│ OVERVIEW │",
-    "├────────────────────────────────────────────────────────┤",
-    "│Sessions                                              2 │",
-    "└────────────────────────────────────────────────────────┘",
-    "│ COST & TOKENS │",
-    "│Input                                              1.2K │",
-    "│Output                                              200 │",
-    "│Cache Read                                          300 │",
-    "│Cache Write                                         100 │",
-    "│ MODEL USAGE │",
-    "│ anthropic/claude-sonnet-4-6                           │",
-    "│ Messages                                              3 │",
-    "│ Input Tokens                                       1.2K │",
-    "│ Output Tokens                                       200 │",
-    "│ Cache Read                                          300 │",
-    "│ Cache Write                                         100 │",
-    "└────────────────────────────────────────────────────────┘"
-  ].join("\n");
-  const usage = parseStatsOutput(output);
-  assert.equal(usage.sessions, 2);
-  assert.equal(usage.input, 1_600);
-  assert.equal(usage.total, 1_800);
-  assert.deepEqual(usage.modelUsage.map(({ model, source, input, cached, cacheWrite, output, reasoning, total }) => ({
-    model, source, input, cached, cacheWrite, output, reasoning, total
-  })), [{
-    model: "anthropic/claude-sonnet-4-6",
-    source: "opencode",
-    input: 1_600,
-    cached: 300,
-    cacheWrite: 100,
-    output: 200,
-    reasoning: 0,
-    total: 1_800
-  }]);
 });

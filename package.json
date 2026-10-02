@@ -1,6 +1,6 @@
 {
   "name": "ai-quota-widget",
-  "version": "1.5.2",
+  "version": "1.5.6",
   "description": "本地 AI Agent 额度与 Token 用量桌面悬浮窗",
   "author": "w1ndwill",
   "license": "MIT",

@@ -42,10 +42,6 @@ function normalizeAppConfig(value = {}) {
     hotkeys: normalizeHotkeys(source.hotkeys ?? DEFAULT_HOTKEYS)
   };
   for (const key of SOURCE_CONFIG_KEYS) if (typeof config[key] !== "boolean") config[key] = DEFAULT_APP_CONFIG[key];
-  config.zoom = Math.max(0.8, Math.min(1.3, Number(config.zoom) || 1));
-  const notifications = config.notifications || {};
-  config.notifications = { enabled: notifications.enabled === true, quiet: notifications.quiet === true, threshold: Math.max(1, Math.min(99, Number(notifications.threshold) || 10)) };
-  config.priceOverrides = Object.fromEntries(Object.entries(config.priceOverrides || {}).filter(([model, price]) => model.trim() && ["input","cached","cacheWrite","output"].every((key) => Number.isFinite(price?.[key]) && price[key] >= 0)).slice(0,256));
   return config;
 }
 

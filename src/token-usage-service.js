@@ -8,7 +8,7 @@ const { readAppendedEvents } = require("./append-jsonl");
 const { addSettledUsageCost } = require("./usage-cost-settlement");
 let recentEventCache = null;
 
-function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, root = defaultSessionsRoot(), sources = null, eventCacheTtl = 0 } = {}) {
+function readLocalTokenUsage({ now = Date.now(), catalogNow = now, days = 1, catalogDays = days, root = defaultSessionsRoot(), sources = null, eventCacheTtl = 0 } = {}) {
   const since = now - days * 24 * 60 * 60 * 1000;
   const catalogSince = catalogDays == null
     ? 0
@@ -21,9 +21,9 @@ function readLocalTokenUsage({ now = Date.now(), days = 1, catalogDays = days, r
     ...recent.fallbacks.filter((usage) => !eventFiles.has(usage.file))
   ];
   const catalogUsages = Array.isArray(sources)
-    ? allUsages.filter((usage) => usage.t <= now && sources.includes(usage.source))
-    : allUsages.filter((usage) => usage.t <= now);
-  const usages = catalogUsages.filter((usage) => usage.t >= since);
+    ? allUsages.filter((usage) => usage.t <= catalogNow && sources.includes(usage.source))
+    : allUsages.filter((usage) => usage.t <= catalogNow);
+  const usages = catalogUsages.filter((usage) => usage.t >= since && usage.t <= now);
 
   const totals = usages.reduce(
     (acc, item) => {
@@ -136,7 +136,7 @@ function readRecentUsageEvents({ since, root, eventCacheTtl = 0, cutoffNow = Dat
       } : null;
     }
     return { events: allFileEvents, fallback };
-  }, { namespace: "codex-and-claude", retainDeleted: true });
+  }, { namespace: "codex-and-claude", retainDeleted: true, parserVersion: 1 });
 
   const events = [];
   const fallbacks = [];
@@ -215,6 +215,12 @@ function readUsageEvents(file, source = null) {
     const usage = item?.payload?.info?.last_token_usage ?? item?.message?.usage;
     const id = item?.message?.id;
     if (!Number.isFinite(timestamp) || !usage || id && state.ids.has(id)) return null;
+    const cumulative = item?.payload?.info?.total_token_usage;
+    if (cumulative && typeof cumulative === "object") {
+      const signature = JSON.stringify(normalizeUsage(cumulative));
+      if (signature === state.codexTotal) return null;
+      state.codexTotal = signature;
+    }
     if (id) state.ids.add(id);
     return { t: timestamp, model: state.model ?? "unknown", ...(source ? { source } : {}), ...normalizeUsage(usage) };
   });
@@ -292,7 +298,8 @@ function normalizeUsage(usage) {
   }
   const output = readNumber(usage.output_tokens, 0);
   const reasoning = readNumber(usage.reasoning_output_tokens, 0);
-  const total = readNumber(usage.total_tokens, input + output + reasoning);
+  // Codex reasoning_output_tokens are already included in output_tokens.
+  const total = readNumber(usage.total_tokens, input + output);
   return { input, cached, cacheWrite, output, reasoning, total };
 }
 

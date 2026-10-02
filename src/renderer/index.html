@@ -69,13 +69,13 @@
                     </linearGradient>
                   </defs>
                   <circle id="shortRingTrack" class="ring-track ring-track-outer" cx="75" cy="75" r="62" />
-                  <circle id="shortRingArc" class="ring-arc ring-arc-short" cx="75" cy="75" r="62" pathLength="100" tabindex="0" role="button" aria-label="5 小时额度" />
+                  <circle id="shortRingArc" class="ring-arc ring-arc-short" cx="75" cy="75" r="62" pathLength="100" tabindex="0" role="button" aria-label="5h限额" />
                   <circle id="longRingTrack" class="ring-track ring-track-inner" cx="75" cy="75" r="48" />
-                  <circle id="longRingArc" class="ring-arc ring-arc-long" cx="75" cy="75" r="48" pathLength="100" tabindex="0" role="button" aria-label="7 天额度" />
+                  <circle id="longRingArc" class="ring-arc ring-arc-long" cx="75" cy="75" r="48" pathLength="100" tabindex="0" role="button" aria-label="周限额" />
                 </svg>
                 <div class="ring-core">
-                  <span id="ringShortValue" class="ring-value ring-value-short"><b id="ringShort">--%</b> <span id="ringShortLabel">5h</span></span>
-                  <span id="ringLongValue" class="ring-value ring-value-long"><b id="ringLong">--%</b> <span id="ringLongLabel">7d</span></span>
+                  <span id="ringShortValue" class="ring-value ring-value-short"><b id="ringShort">--%</b> <span id="ringShortLabel">5h限额</span></span>
+                  <span id="ringLongValue" class="ring-value ring-value-long"><b id="ringLong">--%</b> <span id="ringLongLabel">周限额</span></span>
                   <small id="remainingLabel">剩余</small>
                 </div>
               </div>
@@ -88,7 +88,7 @@
             <section class="quota-list">
               <article id="shortMetric" class="metric">
                 <div class="metric-main">
-                  <div class="metric-title" id="shortLabel">5小时</div>
+                  <div class="metric-title" id="shortLabel">5h限额</div>
                   <div class="bar detail-target" data-detail-key="shortBar" tabindex="0"><span id="shortBar"></span></div>
                 </div>
                 <div class="metric-side">
@@ -125,11 +125,7 @@
             <article id="totalTokenCard" class="token-card total-token interactive-card" data-expand-title="近 24 小时 Token" tabindex="0" aria-label="近 24 小时 Token，点击放大">
               <div class="card-head">
                 <span id="tokenCardTitle">近 24h Token</span>
-                <div class="token-range-toggle" id="tokenRangeToggle">
-                  <button class="range-btn active" data-range="24h" aria-pressed="true">24h</button>
-                  <button id="cumulativeRangeButton" class="range-btn" data-range="cumulative" aria-pressed="false">累计</button>
-                  <span class="range-slider"></span>
-                </div>
+                <div class="token-range-toggle" id="tokenRangeToggle"></div>
               </div>
               <div class="token-card-body" id="tokenCardBody">
                 <b id="tokenCost">本地会话</b>

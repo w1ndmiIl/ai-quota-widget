@@ -8,6 +8,7 @@
     if (report.range.days <= 1) values = report.history.hourly.map((item) => ({ value: item.total || 0, label: new Date(item.t).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", hour12:false }), fullLabel: new Date(item.t).toLocaleString() }));
     else {
       const keys = Object.keys(report.history.daily).sort();
+      if (report.range.preset === "all" && !keys.length) return [];
       const start = new Date(report.range.preset === "all" && keys.length ? keys[0] + "T00:00:00" : report.range.start);
       const end = new Date(report.range.end); start.setHours(0,0,0,0); end.setHours(0,0,0,0);
       const monthly = (end-start)/86400000 > 366;

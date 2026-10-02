@@ -7,11 +7,25 @@
 })(typeof globalThis === "object" ? globalThis : null, () => {
   const MILLION = 1_000_000;
   const CURRENT_PRICING_EFFECTIVE_AT = Date.parse("2026-08-26T23:20:52+08:00");
+  const PRICING_VERIFIED_AT = "2026-10-01";
 
-  // Standard text API prices in USD per 1M tokens, verified 2026-09-03.
+  // Standard text API prices in USD per 1M tokens, verified 2026-10-01.
+  // Sources and dated changes: docs/pricing.md.
   // Request-level surcharges (long context, regional routing, tools and cache
   // storage) cannot be inferred from local session logs and are not included.
   const MODEL_PRICES = [
+    price("GPT-6.1 Sol", /^gpt-6[.-]1-sol(?:-\d{4}-\d{2}-\d{2})?$/, 2, 0.1, 10, {
+      availableSince: "2026-09-29T00:00:00Z"
+    }),
+    price("GPT-6 Astra", /^gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/, 10, 1, 50, {
+      availableSince: "2026-09-03T00:00:00Z"
+    }),
+    price("GPT-6 Sol", /^gpt-6-sol(?:-\d{4}-\d{2}-\d{2})?$/, 2, 0.2, 10, {
+      availableSince: "2026-09-22T00:00:00Z"
+    }),
+    price("GPT-6 Luna", /^gpt-6-luna(?:-\d{4}-\d{2}-\d{2})?$/, 0.1, 0.01, 0.5, {
+      availableSince: "2026-09-22T00:00:00Z"
+    }),
     price("GPT-5.6 Cyber", /^(?:gpt-5\.6-cyber|gpt-daybreak-red-latest|daybreak-red-latest)$/, 12.5, 1.25, 75, {
       availableSince: "2026-09-03T00:00:00Z"
     }),
@@ -46,10 +60,16 @@
     }),
     price("Claude Fable 5", /claude-fable-5(?:\b|-)/, 10, 1, 50),
     price("Claude Mythos 5", /claude-mythos(?:-preview)?-5(?:\b|-)/, 10, 1, 50),
-    price("Claude Opus 5", /claude-opus-5(?:\b|-)/, 5, 0.5, 25),
+    price("Claude Opus 5.5", /claude-opus-5[-.]5(?:\b|-)/, 4, 0.2, 20, {
+      availableSince: "2026-09-22T00:00:00Z"
+    }),
+    price("Claude Opus 5", /claude-opus-5(?![-.]\d(?:\b|-))(?:\b|-)/, 5, 0.5, 25),
     price("Claude Opus 4.5+", /claude-opus-4[-.](?:5|6|7|8)(?:\b|-)/, 5, 0.5, 25),
     price("Claude Opus 4\/4.1", /claude-opus-4(?:[-.]1)?(?:\b|-)/, 15, 1.5, 75),
-    price("Claude Sonnet 5", /claude-sonnet-5(?:\b|-)/, 2, 0.2, 10),
+    price("Claude Sonnet 5.5", /claude-sonnet-5[-.]5(?:\b|-)/, 2, 0.2, 10, {
+      availableSince: "2026-09-28T00:00:00Z"
+    }),
+    price("Claude Sonnet 5", /claude-sonnet-5(?![-.]\d(?:\b|-))(?:\b|-)/, 2, 0.2, 10),
     price("Claude Sonnet 4.x", /claude-sonnet-4(?:[-.][0-9])?(?:\b|-)/, 3, 0.3, 15),
     price("Claude Haiku 4.5", /claude-haiku-4[-.]5(?:\b|-)/, 1, 0.1, 5),
     price("Claude 3.5 Sonnet", /claude-(?:3[-.]5-sonnet|sonnet-3[-.]5)(?:\b|-)/, 3, 0.3, 15),
@@ -57,6 +77,15 @@
     price("Claude 3 Opus", /claude-(?:3-opus|opus-3)(?:\b|-)/, 15, 1.5, 75),
     price("Claude 3 Haiku", /claude-(?:3-haiku|haiku-3)(?:\b|-)/, 0.25, 0.03, 1.25),
 
+    price("Gemini 3.8 Flash", /gemini-3[-.]8-flash(?:\b|-)/, 1.5, 0.15, 7.5, {
+      effectiveSince: "2027-01-01T00:00:00Z"
+    }),
+    price("Gemini 3.7 Flash", /gemini-3[-.]7-flash(?:\b|-)/, 1.5, 0.15, 7.5, {
+      effectiveSince: "2027-01-01T00:00:00Z"
+    }),
+    price("Gemini 3.6 Flash", /gemini-3[-.]6-flash(?:\b|-)/, 1.5, 0.15, 7.5, {
+      effectiveSince: "2027-01-01T00:00:00Z"
+    }),
     price("Gemini 3.8 Flash", /gemini-3[-.]8-flash(?:\b|-)/, 0.75, 0.075, 3.75, {
       availableSince: "2026-09-02T00:00:00Z"
     }),
@@ -73,6 +102,13 @@
     price("Gemini 2.5 Flash-Lite", /gemini-2[-.]5-flash-lite(?:\b|-)/, 0.1, 0.01, 0.4),
     price("Gemini 2.5 Flash", /gemini-2[-.]5-flash(?:\b|-)/, 0.3, 0.03, 2.5),
 
+    price("DeepSeek V4.1 Flash", /deepseek-(?:flash|v4[-.]1-flash|v4-flash(?:-vision-exp)?)(?:\b|-)/, 0.15, 0.003, 0.6, {
+      maxInput: 0.3,
+      maxCached: 0.006,
+      maxOutput: 1.2,
+      timeOfDay: "deepseek",
+      effectiveSince: "2026-09-10T04:00:00Z"
+    }),
     price("DeepSeek V4 Pro", /deepseek-v4-pro(?:\b|-)/, 0.66, 0.022, 1.98, {
       maxInput: 1.32,
       maxCached: 0.044,
@@ -111,10 +147,11 @@
     maxCached = cached,
     maxOutput = output,
     timeOfDay = null,
-    availableSince = null
+    availableSince = null,
+    effectiveSince = null
   } = {}) {
-    const cacheWrite = /^(?:Claude|GPT-5\.6)/.test(label) ? input * 1.25 : input;
-    const maxCacheWrite = /^(?:Claude|GPT-5\.6)/.test(label) ? maxInput * 1.25 : maxInput;
+    const cacheWrite = /^(?:Claude|GPT-(?:5\.6|6))/.test(label) ? input * 1.25 : input;
+    const maxCacheWrite = /^(?:Claude|GPT-(?:5\.6|6))/.test(label) ? maxInput * 1.25 : maxInput;
     return Object.freeze({
       label,
       pattern,
@@ -127,6 +164,7 @@
       maxCacheWrite,
       maxOutput,
       timeOfDay,
+      effectiveSince: effectiveSince ? Date.parse(effectiveSince) : null,
       availableSince: availableSince ? Date.parse(availableSince) : null
     });
   }
@@ -136,20 +174,25 @@
       .trim()
       .toLowerCase()
       .replace(/^models\//, "")
-      .replace(/^anthropic[.:/]/, "")
+      .replace(/^openrouter\//, "")
+      .replace(/^(?:openai|anthropic|google|deepseek)[.:/]/, "")
       .replace(/[_\s]+/g, "-");
   }
 
   function findModelPrice(model, at) {
     const normalized = normalizeModelName(model);
     if (!normalized || normalized === "unknown") return null;
-    const timestamp = Number(at);
+    // Audio and image generation cannot be priced from aggregate text counts.
+    if (/^gemini-.*-(?:image|tts|live)(?:\b|-)/.test(normalized)) return null;
+    const timestamp = at == null || at === "" ? Number.NaN : Number(at);
     if (Number.isFinite(timestamp) && timestamp < CURRENT_PRICING_EFFECTIVE_AT) {
       if (LEGACY_UNPRICED_PATTERNS.some((pattern) => pattern.test(normalized))) return null;
       const legacy = LEGACY_PRICE_OVERRIDES.find((item) => item.pattern.test(normalized));
       if (legacy) return legacy;
     }
-    const current = MODEL_PRICES.find((item) => item.pattern.test(normalized)) || null;
+    const pricingAt = Number.isFinite(timestamp) ? timestamp : Date.now();
+    const current = MODEL_PRICES.find((item) => item.pattern.test(normalized)
+      && (!item.effectiveSince || pricingAt >= item.effectiveSince)) || null;
     if (current?.availableSince && Number.isFinite(timestamp) && timestamp < current.availableSince) return null;
     return resolveTimeOfDayPrice(current, timestamp);
   }
@@ -179,18 +222,27 @@
     const date = new Date(timestamp);
     const day = date.getUTCDay();
     const hour = date.getUTCHours();
+    // These UTC peak windows fall within the same calendar date in China.
+    // Official 2026 holiday ranges; weekends remain off-peak even on makeup days.
+    const key = date.toISOString().slice(0, 10);
+    if ([
+      ["2026-01-01", "2026-01-03"], ["2026-02-15", "2026-02-23"],
+      ["2026-04-04", "2026-04-06"], ["2026-05-01", "2026-05-05"],
+      ["2026-06-19", "2026-06-21"], ["2026-09-25", "2026-09-27"],
+      ["2026-10-01", "2026-10-07"]
+    ].some(([start, end]) => key >= start && key <= end)) return false;
     return day >= 1 && day <= 5 && ((hour >= 1 && hour < 4) || (hour >= 6 && hour < 10));
   }
 
-  function estimateUsageCost(usage, model = usage?.model, at = usage?.t, override = null) {
-    const modelPrice = override ? { ...override, label: model, maxInput: override.input, maxCached: override.cached, maxCacheWrite: override.cacheWrite, maxOutput: override.output } : findModelPrice(model, at);
+  function estimateUsageCost(usage, model = usage?.model, at = usage?.t) {
+    const modelPrice = findModelPrice(model, at);
     if (!modelPrice) return null;
 
     const input = tokenNumber(usage?.input);
     const cached = Math.min(input, tokenNumber(usage?.cached));
     const cacheWrite = Math.min(Math.max(0, input - cached), tokenNumber(usage?.cacheWrite));
     const uncached = Math.max(0, input - cached - cacheWrite);
-    const reasoning = usage?.source === "antigravity" ? tokenNumber(usage?.reasoning) : 0;
+    const reasoning = usage?.source === "antigravity" && !usage.reasoningIncluded ? tokenNumber(usage?.reasoning) : 0;
     const output = tokenNumber(usage?.output) + reasoning;
     const usd = calculateUsd({
       uncached,
@@ -293,7 +345,7 @@
   function usageTokenCount(usage) {
     const input = tokenNumber(usage?.input);
     const output = tokenNumber(usage?.output);
-    const reasoning = usage?.source === "antigravity" ? tokenNumber(usage?.reasoning) : 0;
+    const reasoning = usage?.source === "antigravity" && !usage.reasoningIncluded ? tokenNumber(usage?.reasoning) : 0;
     return input + output + reasoning;
   }
 
@@ -312,6 +364,7 @@
 
   return Object.freeze({
     CURRENT_PRICING_EFFECTIVE_AT,
+    PRICING_VERIFIED_AT,
     findModelPrice,
     estimateUsageCost,
     estimateTokenCost,

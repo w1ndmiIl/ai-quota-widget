@@ -6,28 +6,28 @@ A Windows desktop widget for viewing Codex quota and local token usage from Code
 
 ## Screenshots
 
-These screenshots come from the v1.5.2 renderer with simulated quota and token data; they do not represent your account. Click an image to view it at full size.
+These screenshots come from the v1.5.6 renderer with simulated quota and token data; they do not represent your account. Click an image to view it at full size.
 
 ### Dashboard and date range
 
-[![Quota and token overview](docs/images/v1.5.2/en-overview.png)](docs/images/v1.5.2/en-overview.png)
+[![Quota and token overview](docs/images/v1.5.6/en-overview.png)](docs/images/v1.5.6/en-overview.png)
 
-[![Date-range menu inside the token card](docs/images/v1.5.2/en-range-picker.png)](docs/images/v1.5.2/en-range-picker.png)
+[![Date-range menu inside the token card](docs/images/v1.5.6/en-range-picker.png)](docs/images/v1.5.6/en-range-picker.png)
 
 The token card offers a rolling 24-hour range, today, 7 or 30 days, all history, and custom dates. Changing the range updates usage and trend data while quota readings stay in place.
 
 ### Compact view
 
-[![Compact view](docs/images/v1.5.2/en-compact.png)](docs/images/v1.5.2/en-compact.png)
+[![Compact view](docs/images/v1.5.6/en-compact.png)](docs/images/v1.5.6/en-compact.png)
 
 ## Features
 
 - Reads the current account quota and reset time from the local Codex `app-server`.
-- Refreshes the shared Gemini 5-hour and weekly quota every five minutes while Antigravity is running; when it is closed, only an explicit refresh briefly starts the official background service and then exits.
+- Refreshes Gemini 5-hour and weekly quotas through Google OAuth every five minutes, including when Antigravity is closed. Failed reads can reuse an already-running local service or retain cached data; Antigravity is never started for a quota query.
 - Shows reset-card counts, status, and expiry details.
 - Calculates token usage from local Codex, Claude Code, OpenCode, Gemini CLI, and Cline sessions.
 - Estimates the USD value of tokens from each model's public standard text API rates (not a subscription bill).
-- Estimates Gemini-model token usage from local Antigravity sessions; external models are excluded and this is not official billing data.
+- Reads native Gemini token usage from Antigravity SQLite metadata, including input, cache, output and reasoning. External models are excluded. Retained legacy estimates remain labeled; no new text-based estimates are generated.
 - Provides model filters, trend charts, a daily heatmap, and cache-hit rates where available.
 - Provides complete Chinese and English interfaces with light and dark themes.
 - Supports tray operation, always-on-top, a `336 × 72` compact mode, and single-instance startup.
@@ -39,12 +39,16 @@ The token card offers a rolling 24-hour range, today, 7 or 30 days, all history,
 | :--- | :--- |
 | Codex | Local `app-server` quota and session JSONL |
 | Claude Code | Local project-session JSONL |
-| OpenCode | Local OpenCode CLI statistics and sanitized session exports |
+| OpenCode | Sanitized session exports from the local OpenCode CLI |
 | Gemini CLI | Session token summaries under `~/.gemini/tmp/<project>/chats/` |
 | Cline | Task logs in VS Code-family global storage and `~/.cline/data` |
-| Antigravity | Short-lived official background service for Gemini 5h/weekly quota, plus local transcript estimates |
+| Antigravity | Direct OAuth cloud requests for Gemini 5h/weekly quota; read-only native token metadata in local SQLite, including when the app is closed |
 
 OpenCode requires its local CLI. Gemini CLI contributes session token summaries. Cline covers common data locations for VS Code, VS Code Insiders, VSCodium, Cursor, Windsurf, and Cline CLI.
+
+Antigravity cloud quota reuses the existing Windows Credential Manager sign-in. Expired tokens refresh automatically using matching client parameters read from the installed official program; renewed tokens stay in memory. Revoked sign-ins require logging in again through the official client.
+
+The ring always places the 5-hour limit above the weekly limit. When a valid quota response omits one window, the UI shows `∞` as a display convention; it does not guarantee unlimited server quota. Missing responses and unknown reported values still show a waiting state. See the [Antigravity quota implementation notes](docs/antigravity-direct-quota.md).
 
 ### Application architecture
 
@@ -59,7 +63,7 @@ OpenCode requires its local CLI. Gemini CLI contributes session token summaries.
 
 While the window is visible, the usage worker is reused across the one-minute history refresh cadence. Hiding the window still releases the worker and Codex subprocess under the existing idle policy. The model menu is rebuilt only when its structure or selection actually changes.
 
-Codex and Claude current, historical, and cumulative views share a short-lived event cache. OpenCode exports run asynchronously, share concurrent requests, and publish results in batches. Quota and token data update independently; failed reads retain the last valid values. Compact mode refreshes quota only and pauses hidden charts and token queries until the panel expands.
+Codex and Claude current usage and range reports share a short-lived event cache; repeated cumulative notifications are counted once. OpenCode exports run asynchronously, share concurrent requests, and publish results in batches. Quota and token data update independently; failed reads retain the last valid values. Compact mode refreshes quota only and pauses hidden charts and token queries until the panel expands.
 
 Consecutive dashboard saves are coalesced and written through an atomic file replacement. Normal shutdown waits up to two seconds for pending snapshot writes.
 
@@ -84,11 +88,13 @@ The UI's HTML, CSS, and JavaScript load once when the window starts. While runni
 
 Choose rolling 24 hours, today, 7 / 30 days, all history or custom calendar dates. The model menu retains the complete historical catalog ranked by cumulative usage; the token card uses the selected range. The default 24-hour and seven-day charts remain, while other ranges use the lower chart. Heatmaps show at most the last 42 days of the range.
 
-Recovered Gemini estimates survive later rescans without double-counting. Keep the complete `.userdata` directory when moving a portable installation; the installer backs it up and restores it during an upgrade.
+Native Antigravity records replace legacy estimates for the same session. Unmatched cached estimates are retained and labeled; old transcripts are no longer scanned. Old sessions without native counts or a retained cache have no invented token values. Keep the complete `.userdata` directory when moving a portable installation; the installer backs it up and restores it during an upgrade.
 
 ## Development
 
-Node.js 22.12 or newer is required (Electron 44.3.0).
+Node.js 22.13 or newer is required for built-in SQLite support (Electron 44.3.0).
+
+The retained portable build is 1.5.6 at `release/win-unpacked/AI_bar.exe`. Its current data remains beside it in `.userdata/`; old-version data backups are kept separately in `backups/`.
 
 ```powershell
 npm ci

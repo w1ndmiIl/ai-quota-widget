@@ -1,11 +1,10 @@
 "use strict";
 
-const { spawn } = require("node:child_process");
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
+const { AntigravityOAuthService } = require("./antigravity-oauth-service");
 
 const QUOTA_RPC_PATH = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
 const CACHE_TTL_MS = 60_000;
@@ -17,112 +16,57 @@ class AntigravityQuotaService {
       || process.env.AI_QUOTA_USER_DATA_PATH
       || path.join(os.homedir(), ".ai-quota-widget");
     this.mainLogPath = options.mainLogPath || defaultMainLogPath();
-    this.languageServerPath = options.languageServerPath || defaultLanguageServerPath();
     this.cachePath = options.cachePath || path.join(userDataPath, "antigravity_quota_cache.json");
     this.requestQuotaSummary = options.requestQuotaSummary || requestQuotaSummary;
-    this.spawnLanguageServer = options.spawnLanguageServer || spawn;
+    this.oauth = new AntigravityOAuthService(options.oauthOptions);
+    this.requestDirectQuota = options.requestDirectQuota || (() => this.oauth.readQuota());
     this.now = options.now || Date.now;
     this.lastSnapshot = this.loadCache();
     this.lastReadAt = 0;
     this.pending = null;
-    this.pendingAllowsStart = false;
-    this.temporaryProcess = null;
   }
 
   getCachedQuota() {
     return this.lastSnapshot;
   }
 
-  async readQuota({ allowStart = false, force = false } = {}) {
+  async readQuota({ force = false } = {}) {
     const now = this.now();
-    if (!force && this.lastSnapshot && now - this.lastReadAt < CACHE_TTL_MS) return this.lastSnapshot;
-    if (this.pending) {
-      if (!allowStart || this.pendingAllowsStart) return this.pending;
-      try { await this.pending; } catch {}
-    }
+    if (!force && this.lastSnapshot && now - this.lastReadAt < CACHE_TTL_MS) return { ...this.lastSnapshot, fromCache: true };
+    if (this.pending) return this.pending;
 
-    this.pendingAllowsStart = allowStart;
-    this.pending = this.readFreshQuota(now, { allowStart }).finally(() => {
+    this.pending = this.readFreshQuota().finally(() => {
       this.pending = null;
-      this.pendingAllowsStart = false;
     });
     return this.pending;
   }
 
-  async readFreshQuota(now, { allowStart }) {
-    let payload;
+  async readFreshQuota() {
+    let snapshot, directError;
     try {
-      const connection = discoverAntigravityConnection({ mainLogPath: this.mainLogPath });
-      payload = await this.requestQuotaSummary({ ...connection, timeoutMs: 1500 });
+      snapshot = { ...normalizeAntigravityQuota(await this.requestDirectQuota(), this.now()), transport: "oauth" };
     } catch (error) {
-      if (!allowStart) {
-        if (this.lastSnapshot) return this.lastSnapshot;
-        throw new Error("Antigravity is not running; click refresh to update its quota", { cause: error });
+      directError = error;
+    }
+    if (!snapshot) {
+      try {
+        const connection = discoverAntigravityConnection({ mainLogPath: this.mainLogPath });
+        const payload = await this.requestQuotaSummary({ ...connection, timeoutMs: 1500 });
+        snapshot = { ...normalizeAntigravityQuota(payload, this.now()), transport: "local" };
+      } catch {
+        if (this.lastSnapshot) return { ...this.lastSnapshot, fromCache: true, readError: directError.message };
+        throw directError;
       }
-      payload = await this.readWithTemporaryServer();
     }
 
-    const snapshot = normalizeAntigravityQuota(payload, now);
     this.lastSnapshot = snapshot;
-    this.lastReadAt = now;
+    this.lastReadAt = this.now();
     this.saveCache(snapshot);
     return snapshot;
   }
 
-  readWithTemporaryServer() {
-    if (!fs.existsSync(this.languageServerPath)) {
-      return Promise.reject(new Error("Antigravity is not installed"));
-    }
-
-    const csrfToken = crypto.randomUUID();
-    const process = this.spawnLanguageServer(this.languageServerPath, temporaryServerArgs(csrfToken), {
-      cwd: path.dirname(this.languageServerPath),
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    this.temporaryProcess = process;
-
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let quotaReadStarted = false;
-      let output = "";
-      const timeout = setTimeout(() => finish(new Error("Antigravity background quota service timed out")), 15_000);
-      timeout.unref?.();
-
-      const finish = (error, payload) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        if (this.temporaryProcess === process) this.temporaryProcess = null;
-        try { process.kill(); } catch {}
-        error ? reject(error) : resolve(payload);
-      };
-
-      const inspectOutput = (chunk) => {
-        if (quotaReadStarted) return;
-        output = (output + chunk.toString("utf8")).slice(-30_000);
-        const match = output.match(/listening on \w+ port at (\d+) for HTTPS/i);
-        if (!match) return;
-        quotaReadStarted = true;
-        requestQuotaWithRetry(this.requestQuotaSummary, {
-          port: Number(match[1]),
-          csrfToken
-        }).then((payload) => finish(null, payload), finish);
-      };
-
-      process.stdout?.on("data", inspectOutput);
-      process.stderr?.on("data", inspectOutput);
-      process.once("error", finish);
-      process.once("exit", (code) => {
-        if (!settled) finish(new Error(`Antigravity background quota service exited (${code ?? "unknown"})`));
-      });
-    });
-  }
-
   dispose() {
-    const process = this.temporaryProcess;
-    this.temporaryProcess = null;
-    try { process?.kill(); } catch {}
+    this.oauth.refreshed = this.oauth.client = this.oauth.originalAccessToken = null;
   }
 
   loadCache() {
@@ -149,25 +93,6 @@ class AntigravityQuotaService {
 function defaultMainLogPath() {
   const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
   return path.join(appData, "Antigravity", "logs", "main.log");
-}
-
-function defaultLanguageServerPath() {
-  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-  return path.join(localAppData, "Programs", "Antigravity", "resources", "bin", "language_server.exe");
-}
-
-function temporaryServerArgs(csrfToken) {
-  return [
-    "--standalone",
-    "--override_ide_name", "antigravity",
-    "--subclient_type", "hub",
-    "--override_user_agent_name", "antigravity",
-    "--https_server_port", "0",
-    "--csrf_token", csrfToken,
-    "--app_data_dir", "antigravity",
-    "--api_server_url", "https://generativelanguage.googleapis.com",
-    "--cloud_code_endpoint", "https://daily-cloudcode-pa.googleapis.com"
-  ];
 }
 
 function discoverAntigravityConnection({ mainLogPath = defaultMainLogPath() } = {}) {
@@ -266,19 +191,6 @@ function requestQuotaSummary({ port, csrfToken, timeoutMs = 5000 }) {
   });
 }
 
-async function requestQuotaWithRetry(request, connection) {
-  let lastError;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    try {
-      return await request({ ...connection, timeoutMs: 3000 });
-    } catch (error) {
-      lastError = error;
-      if (attempt < 9) await new Promise((resolve) => setTimeout(resolve, 350));
-    }
-  }
-  throw lastError;
-}
-
 function normalizeAntigravityQuota(payload, updatedAt = Date.now()) {
   const groups = payload?.response?.groups ?? payload?.groups;
   if (!Array.isArray(groups)) throw new Error("Antigravity quota response did not contain groups");
@@ -296,9 +208,13 @@ function normalizeAntigravityQuota(payload, updatedAt = Date.now()) {
 }
 
 function normalizeBucket(bucket, durationMins, label) {
-  const fraction = Number(bucket?.remainingFraction);
-  if (!Number.isFinite(fraction)) return null;
-  const remainingPercent = Math.round(Math.max(0, Math.min(1, fraction)) * 100);
+  if (bucket?.disabled === true) return null;
+  const raw = bucket?.remainingFraction ?? bucket?.remaining?.remainingFraction
+    ?? (bucket?.remaining?.case === "remainingFraction" ? bucket.remaining.value : null);
+  if (raw == null || typeof raw === "boolean" || typeof raw === "string" && !raw.trim()) return null;
+  const fraction = Number(raw);
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) return null;
+  const remainingPercent = Math.round(fraction * 100);
   const resetsAt = Date.parse(bucket?.resetTime);
   return {
     label,
@@ -318,6 +234,5 @@ module.exports = {
   discoverAntigravityConnection,
   encodeGrpcWebJson,
   normalizeAntigravityQuota,
-  requestQuotaSummary,
-  temporaryServerArgs
+  requestQuotaSummary
 };

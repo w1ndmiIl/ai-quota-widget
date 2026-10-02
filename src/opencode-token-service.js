@@ -54,17 +54,6 @@ async function readOpenCodeTokenUsage(options = {}) {
   }), readError: refreshError, partial: pendingSessions.length > 0 };
 }
 
-async function readOpenCodeStatsUsage({ days = 1, runner = runOpenCode, binary } = {}) {
-  const executable = binary || findOpenCodeBinary();
-  if (!executable && runner === runOpenCode) return emptyStatsUsage();
-  const args = ["stats"];
-  if (days !== null) args.push("--days", String(days));
-  args.push("--models");
-  const result = await runner(executable, args);
-  if (!result?.ok) return emptyStatsUsage();
-  return parseStatsOutput(result.stdout);
-}
-
 async function readOpenCodeTokenHistory(options = {}) {
   const now = options.now || Date.now();
   const days = options.days || 45;
@@ -248,108 +237,6 @@ function parseSessionExport(stdout, session = {}) {
   return events;
 }
 
-function parseStatsOutput(stdout) {
-  if (typeof stdout !== "string") return emptyStatsUsage();
-  const lines = stdout.replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, "").split(/\r?\n/);
-  const totals = { input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 };
-  const modelUsage = [];
-  let sessions = 0;
-  let section = "";
-  let currentModel = null;
-  let current = null;
-  const finishModel = () => {
-    if (!currentModel || !current) return;
-    current.input += current.cached + current.cacheWrite;
-    current.total = current.input + current.output;
-    modelUsage.push({ model: currentModel, source: "opencode", ...current });
-    currentModel = null;
-    current = null;
-  };
-
-  for (const rawLine of lines) {
-    const content = rawLine.startsWith("│") && rawLine.endsWith("│") ? rawLine.slice(1, -1).trim() : "";
-    if (content === "OVERVIEW") { section = "overview"; continue; }
-    if (content === "COST & TOKENS") { section = "tokens"; continue; }
-    if (content === "MODEL USAGE") { section = "models"; continue; }
-    if (content === "TOOL USAGE") { finishModel(); section = "tools"; continue; }
-    if (!content || rawLine.startsWith("├") || rawLine.startsWith("┌") || rawLine.startsWith("└")) continue;
-    const row = splitStatsRow(content);
-    if (section === "overview" && row?.label === "Sessions") sessions = parseCompactNumber(row.value);
-    if (section === "tokens" && row) {
-      if (row.label === "Input") totals.input = parseCompactNumber(row.value);
-      if (row.label === "Output") totals.output = parseCompactNumber(row.value);
-      if (row.label === "Cache Read") totals.cached = parseCompactNumber(row.value);
-      if (row.label === "Cache Write") totals.cacheWrite = parseCompactNumber(row.value);
-    }
-    if (section === "models") {
-      const modelRow = splitStatsRow(content, true);
-      if (!modelRow) {
-        finishModel();
-        currentModel = content;
-        current = { input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 };
-      } else if (current) {
-        if (modelRow.label === "Input Tokens") current.input = parseCompactNumber(modelRow.value);
-        if (modelRow.label === "Output Tokens") current.output = parseCompactNumber(modelRow.value);
-        if (modelRow.label === "Cache Read") current.cached = parseCompactNumber(modelRow.value);
-        if (modelRow.label === "Cache Write") current.cacheWrite = parseCompactNumber(modelRow.value);
-      }
-    }
-  }
-  finishModel();
-  if (modelUsage.length) {
-    totals.input = modelUsage.reduce((sum, item) => sum + item.input, 0);
-    totals.cached = modelUsage.reduce((sum, item) => sum + item.cached, 0);
-    totals.cacheWrite = modelUsage.reduce((sum, item) => sum + item.cacheWrite, 0);
-    totals.output = modelUsage.reduce((sum, item) => sum + item.output, 0);
-  } else {
-    totals.input += totals.cached + totals.cacheWrite;
-  }
-  totals.total = totals.input + totals.output;
-  if (totals.total <= 0 && !modelUsage.length) return emptyStatsUsage();
-  return {
-    source: "opencode",
-    ...totals,
-    cacheHitRate: totals.input > 0 ? Math.round((totals.cached / totals.input) * 100) : null,
-    modelUsage: modelUsage.sort((a, b) => b.total - a.total || a.model.localeCompare(b.model)),
-    modelCatalog: modelUsage,
-    sessions,
-    error: null
-  };
-}
-
-function splitStatsRow(content, modelSection = false) {
-  const labels = modelSection
-    ? ["Input Tokens", "Output Tokens", "Cache Read", "Cache Write", "Messages", "Cost"]
-    : ["Avg Tokens/Session", "Median Tokens/Session", "Avg Cost/Day", "Total Cost", "Cache Read", "Cache Write", "Sessions", "Messages", "Days", "Input", "Output"];
-  const label = labels.find((candidate) => content.startsWith(candidate) && /\s/.test(content[candidate.length] || ""));
-  if (!label) return null;
-  return { label, value: content.slice(label.length).trim() };
-}
-
-function parseCompactNumber(value) {
-  const match = String(value).replace(/,/g, "").trim().match(/^(-?\d+(?:\.\d+)?)([KMB])?$/i);
-  if (!match) return 0;
-  const scales = { K: 1_000, M: 1_000_000, B: 1_000_000_000 };
-  return Math.round(Number(match[1]) * (scales[(match[2] || "").toUpperCase()] || 1));
-}
-
-function emptyStatsUsage() {
-  return {
-    source: "opencode",
-    input: null,
-    cached: null,
-    cacheWrite: null,
-    output: null,
-    reasoning: null,
-    total: null,
-    cacheHitRate: null,
-    modelUsage: [],
-    modelCatalog: [],
-    sessions: 0,
-    error: "No local OpenCode session usage found"
-  };
-}
-
 function parseJsonOutput(stdout, open, close) {
   if (typeof stdout !== "string") return null;
   const start = stdout.indexOf(open);
@@ -431,8 +318,8 @@ module.exports = {
   findOpenCodeBinary,
   parseSessionExport,
   parseSessionList,
-  parseStatsOutput,
-  readOpenCodeStatsUsage,
+
+
   readOpenCodeTokenHistory,
   readOpenCodeTokenUsage
 };
