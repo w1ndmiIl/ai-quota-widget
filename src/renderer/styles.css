@@ -421,13 +421,12 @@ body {
   box-shadow: 0 12px 28px rgba(34, 72, 52, 0.12), inset 0 0 0 1px rgba(255, 255, 255, 0.8);
   cursor: pointer;
   transition: transform 280ms var(--motion-spring), box-shadow 280ms ease, filter 280ms var(--motion-spring);
-  will-change: transform;
 }
 
 .ring:hover,
 .ring:focus-visible {
   transform: translateY(-3px) scale(1.008);
-  animation: ring-float 2.6s 360ms ease-in-out infinite;
+  animation: ring-float 700ms ease-in-out 1;
   box-shadow: 0 16px 34px rgba(34, 72, 52, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.9);
   filter: saturate(1.06) brightness(1.01);
 }
