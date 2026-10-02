@@ -51,7 +51,7 @@ test("matches provider model IDs and friendly Antigravity names", () => {
   assert.equal(findModelPrice("gemini-3.6-flash").output, 3.75);
   assert.equal(findModelPrice("gemini-3.5-flash-lite").input, 0.3);
   assert.equal(findModelPrice("deepseek-v4-pro", Number.NaN).cached, 0.044);
-  assert.equal(findModelPrice("deepseek-v4-flash-vision-exp", Number.NaN).label, "DeepSeek V4 Flash Vision Experimental");
+  assert.equal(findModelPrice("deepseek-v4-flash-vision-exp", Number.NaN).label, "DeepSeek V4.1 Flash");
 });
 
 test("does not apply newly released model prices before availability", () => {
@@ -134,4 +134,45 @@ test("formats small and regular USD values without hiding non-zero usage", () =>
   assert.equal(formatUsd(12.345), "$12.35");
   assert.equal(formatUsd(0.00421), "$0.0042");
   assert.equal(formatUsd(0.00001), "<$0.0001");
+});
+
+test("prices new GPT and Claude models with their own cache and availability rules", () => {
+  for (const [model, input, cached, cacheWrite, output, date] of [
+    ["gpt-6-astra", 10, 1, 12.5, 50, "2026-09-03"],
+    ["gpt-6-sol", 2, 0.2, 2.5, 10, "2026-09-22"],
+    ["gpt-6-luna", 0.1, 0.01, 0.125, 0.5, "2026-09-22"],
+    ["gpt-6.1-sol", 2, 0.1, 2.5, 10, "2026-09-29"],
+    ["claude-opus-5-5", 4, 0.2, 5, 20, "2026-09-22"],
+    ["claude-sonnet-5-5", 2, 0.2, 2.5, 10, "2026-09-28"]
+  ]) {
+    const at = Date.parse(date + "T00:00:00Z");
+    const price = findModelPrice(model, at);
+    assert.deepEqual([price.input, price.cached, price.cacheWrite, price.output], [input, cached, cacheWrite, output]);
+    assert.equal(findModelPrice(model, at - 1), null);
+  }
+  assert.equal(findModelPrice("openai/gpt-6.1-sol").label, "GPT-6.1 Sol");
+  assert.equal(findModelPrice("openrouter/openai/gpt-6-sol").label, "GPT-6 Sol");
+  assert.equal(findModelPrice("Claude Opus 5.5 (Thinking)").cached, 0.2);
+  assert.equal(findModelPrice("claude-opus-5-9"), null);
+  assert.equal(findModelPrice("gemini-3.8-flash-lite-tts"), null);
+});
+
+test("dated DeepSeek aliases retain old prices and exclude 2026 Chinese holidays from peak hours", () => {
+  const before = Date.parse("2026-09-10T04:00:00Z") - 1;
+  const after = before + 1;
+  assert.equal(findModelPrice("deepseek-v4-flash", before).input, 0.44);
+  assert.equal(findModelPrice("deepseek-v4-flash", after).input, 0.15);
+  assert.equal(findModelPrice("deepseek-flash", before), null);
+  assert.equal(findModelPrice("deepseek-flash", Date.parse("2026-09-11T02:00:00Z")).input, 0.3);
+  assert.equal(findModelPrice("deepseek-flash", Date.parse("2026-10-01T02:00:00Z")).input, 0.15);
+  assert.equal(findModelPrice("deepseek-v4-pro", Date.parse("2026-10-01T02:00:00Z")).input, 0.66);
+  assert.equal(findModelPrice("deepseek-flash", null).input, 0.3);
+});
+
+test("scheduled Gemini promotion end does not reprice historical tokens", () => {
+  const end = Date.parse("2027-01-01T00:00:00Z");
+  for (const model of ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"]) {
+    assert.equal(findModelPrice(model, end - 1).input, 0.75);
+    assert.equal(findModelPrice(model, end).input, 1.5);
+  }
 });

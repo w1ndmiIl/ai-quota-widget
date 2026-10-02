@@ -4,6 +4,7 @@ const { addSettledUsageCost } = require("./usage-cost-settlement");
 
 function summarizeUsageEvents(events, {
   now = Date.now(),
+  catalogNow = now,
   days = 1,
   catalogDays = days,
   source,
@@ -12,8 +13,8 @@ function summarizeUsageEvents(events, {
   const dayMs = 24 * 60 * 60 * 1000;
   const since = days == null ? 0 : now - days * dayMs;
   const catalogSince = catalogDays == null ? 0 : now - Math.max(days, catalogDays) * dayMs;
-  const catalogEvents = events.filter((event) => event.t >= catalogSince && event.t <= now);
-  const currentEvents = catalogEvents.filter((event) => event.t >= since);
+  const catalogEvents = events.filter((event) => event.t >= catalogSince && event.t <= catalogNow);
+  const currentEvents = catalogEvents.filter((event) => event.t >= since && event.t <= now);
   const modelUsage = summarizeModels(currentEvents, source);
   const modelCatalog = days == null || catalogDays == null || catalogDays > days
     ? summarizeModels(catalogEvents, source)
@@ -88,6 +89,10 @@ function summarizeModels(events, source) {
     const model = event.model || "unknown";
     if (!models.has(model)) models.set(model, { model, source, ...emptyTotals() });
     const bucket = models.get(model);
+    if (source === "antigravity") {
+      bucket.reasoningIncluded = true;
+      bucket.usageAccuracy = !bucket.usageAccuracy || bucket.usageAccuracy === event.usageAccuracy ? event.usageAccuracy : "mixed";
+    }
     addUsage(bucket, event);
     addSettledUsageCost(bucket, { ...event, source: event.source || source }, model);
   }
@@ -96,7 +101,8 @@ function summarizeModels(events, source) {
 
 function addUsage(target, usage) {
   target.input += usage.input || 0;
-  target.cached += usage.cached || 0;
+  if (usage.source === "antigravity" && usage.cached == null) target.cached = null;
+  else if (target.cached != null) target.cached += usage.cached || 0;
   target.cacheWrite += usage.cacheWrite || 0;
   target.output += usage.output || 0;
   target.reasoning += usage.reasoning || 0;

@@ -22,7 +22,7 @@ const {
 } = require("../src/token-usage-service");
 const { CodexService } = require("../src/codex-service");
 const {
-  extractModel,
+
   isGeminiModel,
   readLocalTokenUsage: readAntigravityTokenUsage
 } = require("../src/antigravity-token-service");
@@ -518,100 +518,6 @@ test("normalizes second and millisecond timestamps", () => {
   assert.equal(normalizeTimestamp(1800000000), 1800000000000);
   assert.equal(normalizeTimestamp(1800000000000), 1800000000000);
   assert.equal(normalizeTimestamp(null), null);
-});
-
-test("only extracts Antigravity models from explicit settings changes", () => {
-  assert.equal(
-    extractModel({
-      type: "USER_INPUT",
-      content: "make MULTIPLE non-contiguous edits to `d:\\DevApps\\skill_store\\static\\index.css`."
-    }),
-    null
-  );
-  assert.equal(
-    extractModel({
-      type: "USER_INPUT",
-      content: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Claude Opus 4.6 (Thinking). No need to comment on this change."
-    }),
-    "Claude Opus 4.6 (Thinking)"
-  );
-  assert.equal(
-    extractModel({
-      type: "USER_INPUT",
-      content: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.5 Flash (High)."
-    }),
-    "Gemini 3.5 Flash (High)"
-  );
-  assert.equal(
-    extractModel({
-      type: "USER_INPUT",
-      content: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Gemini 3.5 Flash (High) to Claude Opus 4.6 (Thinking)."
-    }),
-    "Claude Opus 4.6 (Thinking)"
-  );
-  assert.equal(isGeminiModel("Gemini 3.5 Flash (High)"), true);
-  assert.equal(isGeminiModel("google/gemini-2.5-pro"), true);
-  assert.equal(isGeminiModel("Claude Opus 4.6 (Thinking)"), false);
-});
-
-test("counts only Gemini models from Antigravity sessions", (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bar-antigravity-gemini-only-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const logs = path.join(dir, "brain-1", ".system_generated", "logs");
-  fs.mkdirSync(logs, { recursive: true });
-  const now = Date.parse("2026-08-20T12:00:00Z");
-  const modelChange = (from, to, offset) => ({
-    type: "USER_INPUT",
-    created_at: new Date(now + offset).toISOString(),
-    content: `<USER_SETTINGS_CHANGE>\nThe user changed setting \`Model Selection\` from ${from} to ${to}.`
-  });
-  const response = (content, offset) => ({
-    type: "PLANNER_RESPONSE",
-    created_at: new Date(now + offset).toISOString(),
-    content
-  });
-  fs.writeFileSync(path.join(logs, "transcript.jsonl"), [
-    modelChange("None", "Gemini 3.5 Flash (High)", 0),
-    response("gemini response", 1),
-    modelChange("Gemini 3.5 Flash (High)", "Claude Opus 4.6 (Thinking)", 2),
-    response("external response", 3)
-  ].map(JSON.stringify).join("\n"), "utf8");
-
-  const usage = readAntigravityTokenUsage({ now: now + 1_000, days: 1, catalogDays: null, root: [dir] });
-  assert.deepEqual(usage.modelUsage.map((item) => item.model), ["Gemini 3.5 Flash (High)"]);
-  assert.equal(usage.sessions, 1);
-});
-
-test("keeps settled Antigravity usage after its session directory is removed", (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bar-antigravity-ledger-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const session = path.join(dir, "brain-1");
-  const logs = path.join(session, ".system_generated", "logs");
-  fs.mkdirSync(logs, { recursive: true });
-  const transcript = path.join(logs, "transcript.jsonl");
-  const now = Date.parse("2026-08-20T12:00:00Z");
-  fs.writeFileSync(transcript, [
-    JSON.stringify({
-      type: "USER_INPUT",
-      created_at: new Date(now).toISOString(),
-      content: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.5 Flash (High)."
-    }),
-    JSON.stringify({
-      type: "PLANNER_RESPONSE",
-      created_at: new Date(now + 1).toISOString(),
-      content: "done"
-    })
-  ].join("\n"), "utf8");
-
-  const options = { now: now + 1_000, days: 1, catalogDays: null, root: [dir] };
-  const first = readAntigravityTokenUsage(options);
-  assert.ok(first.total > 0);
-  assert.equal(first.modelCatalog[0].model, "Gemini 3.5 Flash (High)");
-  fs.rmSync(session, { recursive: true, force: true });
-
-  const retained = readAntigravityTokenUsage(options);
-  assert.equal(retained.total, first.total);
-  assert.equal(retained.modelCatalog[0].model, "Gemini 3.5 Flash (High)");
 });
 
 test("reads Claude Code projects session log with message.model, message.usage and deduplicates", (t) => {

@@ -17,15 +17,4 @@ function resolveRange(range = {}, now = Date.now()) {
   if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) throw new Error("Invalid date range");
   return { preset, start, end, days: Math.max(1, end - start) / DAY };
 }
-function serializeReport(report, format) {
-  if (format === "json") return JSON.stringify(report, null, 2);
-  if (format !== "csv") throw new Error("Unsupported export format");
-  const escape = (value) => {
-    let text = String(value ?? "");
-    if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
-    return '"' + text.replaceAll('"', '""') + '"';
-  };
-  const columns = ["rangeStart", "rangeEnd", "source", "model", "input", "cached", "cacheWrite", "output", "reasoning", "total", "estimatedUsd"];
-  return "\uFEFF" + [columns.join(","), ...(report.models || []).map((model) => columns.map((key) => escape(key === "rangeStart" ? new Date(report.range.start).toISOString() : key === "rangeEnd" ? new Date(report.range.end).toISOString() : model[key])).join(","))].join("\r\n");
-}
-module.exports = { resolveRange, serializeReport };
+module.exports = { resolveRange };

@@ -4,7 +4,7 @@ const { parentPort } = require("node:worker_threads");
 if (parentPort) process.env.AI_QUOTA_PARTITION_LEDGER = "1";
 const { configureScanCache } = require("./scan-memo");
 const { resolveRange } = require("./usage-report");
-const TokenPricing = require("./renderer/token-pricing");
+
 configureScanCache(15_000);
 const {
   readLocalTokenUsage,
@@ -151,59 +151,9 @@ function parseSelection(selection = "all") {
   return { source: null, model: selection };
 }
 
-async function readCumulative({ selection = "all", model, source = null, enableCodex = true, enableClaudeCode = true, enableOpenCode = true, enableGeminiCli = true, enableCline = true, enableAntigravity = true }) {
-  const selected = selection !== "all" || model == null
-    ? parseSelection(selection)
-    : { model, source };
-  const sum = { input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 };
-  const modelUsage = [];
-  let cacheInput = 0;
-  let cacheKnown = false;
-  const addUsage = (usage, hasCacheData, defaultSource) => {
-    const items = selected.model === "all"
-      ? usage?.modelUsage || []
-      : (usage?.modelUsage || []).filter((item) => item.model === selected.model);
-    for (const item of items) {
-      const value = { ...item, source: item.source || defaultSource };
-      modelUsage.push(value);
-      sum.input += value.input || 0;
-      sum.cacheWrite += value.cacheWrite || 0;
-      sum.output += value.output || 0;
-      sum.reasoning += value.reasoning || 0;
-      sum.total += value.total || 0;
-      if (hasCacheData) {
-        cacheKnown = true;
-        cacheInput += value.input || 0;
-        sum.cached += value.cached || 0;
-      }
-    }
-  };
-
-  const wantsAntigravity = !selected.source || selected.source === "antigravity";
-  const wantsCodex = !selected.source || selected.source === "codex";
-  const wantsClaude = !selected.source || selected.source === "claude";
-  const wantsOpenCode = !selected.source || selected.source === "opencode";
-  const wantsGemini = !selected.source || selected.source === "gemini";
-  const wantsCline = !selected.source || selected.source === "cline";
-  const sessionSources = [];
-  if (enableCodex && wantsCodex) sessionSources.push("codex");
-  if (enableClaudeCode && wantsClaude) sessionSources.push("claude");
-  if (sessionSources.length) addUsage(readLocalTokenUsage({ days: 9999, sources: sessionSources, eventCacheTtl: 15_000 }), true);
-  if (enableOpenCode && wantsOpenCode) addUsage(await readOpenCodeTokenUsage({ days: null, catalogDays: null }), true, "opencode");
-  if (enableGeminiCli && wantsGemini) addUsage(readGeminiTokenUsage({ days: 9999 }), true, "gemini");
-  if (enableCline && wantsCline) addUsage(readClineTokenUsage({ days: 9999 }), true, "cline");
-  if (enableAntigravity && wantsAntigravity) addUsage(readAntigravityUsage({ days: 9999 }), false, "antigravity");
-  return {
-    ...sum,
-    cached: cacheKnown ? sum.cached : null,
-    cacheHitRate: cacheKnown && cacheInput > 0 ? Math.round((sum.cached / cacheInput) * 100) : null,
-    modelUsage
-  };
-}
-
 async function readReport(payload) {
   const range = resolveRange(payload.range, payload.now);
-  const options = { now: range.end, days: range.days, sources: localSources(payload), hours: Math.min(24, range.days * 24) };
+  const options = { now: range.end, catalogNow: payload.now ?? Date.now(), days: range.days, sources: localSources(payload), hours: Math.min(24, range.days * 24) };
   const usages = [await readCombinedLocalUsage(options)];
   const histories = [await readCombinedLocalHistory({ ...options, model: "all", skipRefresh: true })];
   if (payload.enableAntigravity) {
@@ -215,12 +165,6 @@ async function readReport(payload) {
   }
   const models = usages.flatMap((usage) => usage?.modelUsage || []).sort((a,b) => b.total-a.total);
   const catalog = usages.flatMap((usage) => usage?.modelCatalog || usage?.modelUsage || []).sort((a,b) => b.total-a.total);
-  for (const model of models) {
-    const override = payload.priceOverrides?.[model.model];
-    if (!override || ["input", "cached", "cacheWrite", "output"].some((key) => !Number.isFinite(override[key]) || override[key] < 0)) continue;
-    const cost = TokenPricing.estimateUsageCost(model, model.model, undefined, override);
-    Object.assign(model, { estimatedUsd: cost.usd, estimatedMaxUsd: cost.maxUsd, pricedTokens: cost.tokens, unpricedTokens: 0, unknownModels: [], variableModels: [], pricingSettled: true, customPrice: true });
-  }
   const selected = parseSelection(payload.selection || "all");
   const selectedModels = models.filter((model) => (!selected.source || model.source === selected.source || selected.source === "antigravity" && !model.source) && (selected.model === "all" || model.model === selected.model));
   let history;
@@ -240,7 +184,7 @@ async function readReport(payload) {
 function execute(operation, payload = {}, onProgress) {
   switch (operation) {
     case "cancel": require("./opencode-token-service").cancelReads(); return true;
-    case "metrics": return require("./incremental-scan-engine").getScanMetrics();
+
     case "report": return readReport(payload);
     case "invalidate":
       configureScanCache(0); configureScanCache(15_000);
@@ -250,12 +194,6 @@ function execute(operation, payload = {}, onProgress) {
       return readCombinedLocalUsage(payload, onProgress);
     case "antigravityUsage":
       return readUsageWithModelCatalog(readAntigravityUsage);
-    case "localHistory":
-      return readCombinedLocalHistory(payload);
-    case "antigravityHistory":
-      return readAntigravityHistory(payload);
-    case "cumulative":
-      return readCumulative(payload);
     default:
       throw new Error(`Unknown usage worker operation: ${operation}`);
   }

@@ -32,7 +32,7 @@ function addSettledUsageCost(target, usage, model = usage?.model) {
 function usageTokenCount(usage) {
   const input = finite(usage?.input);
   const output = finite(usage?.output);
-  const reasoning = usage?.source === "antigravity" ? finite(usage?.reasoning) : 0;
+  const reasoning = usage?.source === "antigravity" && !usage.reasoningIncluded ? finite(usage?.reasoning) : 0;
   return input + output + reasoning;
 }
 

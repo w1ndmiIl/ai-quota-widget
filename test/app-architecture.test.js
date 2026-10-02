@@ -76,31 +76,6 @@ test("reuses the usage worker across the one-minute history cadence", async () =
   assert.equal(terminated, 1);
 });
 
-test("coalesces identical history work in the usage coordinator", async () => {
-  const calls = [];
-  let resolveHistory;
-  const workerClient = {
-    request(operation, payload) {
-      calls.push({ operation, payload });
-      if (operation === "localHistory") {
-        return new Promise((resolve) => { resolveHistory = resolve; });
-      }
-      return Promise.resolve({ total: 1 });
-    },
-    stop() { return true; }
-  };
-  const config = loadAppConfig("missing-config.json");
-  const coordinator = new UsageCoordinator({ workerClient, getConfig: () => config });
-  const first = coordinator.readHistory("local", "all");
-  const second = coordinator.readHistory("local", "all");
-  assert.strictEqual(first, second);
-  assert.equal(calls.length, 1);
-  resolveHistory({ daily: {}, hourly: [] });
-  await first;
-  await coordinator.readHistory("local", "all");
-  assert.equal(calls.length, 1);
-});
-
 test("does not let stale worker results overwrite caches after source changes", async () => {
   const resolvers = [];
   const workerClient = {
@@ -111,71 +86,27 @@ test("does not let stale worker results overwrite caches after source changes", 
   };
   const config = loadAppConfig("missing-config.json");
   const coordinator = new UsageCoordinator({ workerClient, getConfig: () => config });
-  const stale = coordinator.readHistory("local", "all");
+  const stale = coordinator.readLocalUsage();
   coordinator.clearCaches();
-  const fresh = coordinator.readHistory("local", "all");
+  const fresh = coordinator.readLocalUsage();
   assert.equal(resolvers.length, 2);
 
   resolvers[0]({ daily: { stale: { total: 1 } }, hourly: [] });
   await stale;
-  assert.strictEqual(coordinator.readHistory("local", "all"), fresh);
+  assert.equal(coordinator.cachedLocalUsage, null);
   resolvers[1]({ daily: { fresh: { total: 2 } }, hourly: [] });
   await fresh;
-  assert.deepEqual((await coordinator.readHistory("local", "all")).daily, { fresh: { total: 2 } });
+  assert.deepEqual((await coordinator.readLocalUsage()).daily, { fresh: { total: 2 } });
 });
 
-test("keeps renderer model aggregation behavior in a pure module", () => {
-  const snapshot = {
-    localTokenUsage: {
-      total: 30,
-      input: 20,
-      cached: 5,
-      cacheWrite: 0,
-      output: 10,
-      reasoning: 0,
-      modelUsage: [
-        { model: "gpt-5", source: "codex", input: 20, cached: 5, output: 10, total: 30 },
-        { model: "gpt-5.6", source: "codex", input: 70, cached: 10, output: 30, total: 100 }
-      ],
-      modelCatalog: [
-        { model: "gpt-5", source: "codex", input: 100, cached: 20, output: 30, total: 130 },
-        { model: "gpt-5.6", source: "codex", input: 80, cached: 10, output: 30, total: 120 },
-        { model: "unused", source: "codex", input: 0, cached: 0, output: 0, total: 0 }
-      ]
-    },
-    antigravityTokenUsage: { total: 7, input: 5, cached: null, output: 2, reasoning: 0, modelUsage: [] }
-  };
-  const models = ModelUsage.buildMergedModels(snapshot);
-  assert.equal(models.length, 2);
-  assert.deepEqual(models.map(({ model, total }) => ({ model, total })), [
-    { model: "gpt-5", total: 130 },
-    { model: "gpt-5.6", total: 120 }
-  ]);
-  assert.equal(models[0].currentUsage, true);
-  assert.equal(ModelUsage.getTokenForModel(snapshot, "codex:gpt-5").total, 30);
-  // Antigravity totals without a verified Gemini model are excluded.
-  assert.equal(ModelUsage.getTokenForModel(snapshot, "all").total, 30);
-});
-
-test("keeps third-party Antigravity models out of model and aggregate views", () => {
-  const snapshot = {
-    antigravityTokenUsage: {
-      total: 300,
-      input: 240,
-      cached: null,
-      output: 60,
-      modelUsage: [
-        { model: "Gemini 3.8 Flash (High)", input: 80, cached: null, output: 20, total: 100 },
-        { model: "Claude Opus 4.6 (Thinking)", input: 160, cached: null, output: 40, total: 200 }
-      ],
-      modelCatalog: [
-        { model: "Gemini 3.8 Flash (High)", input: 80, cached: null, output: 20, total: 100 },
-        { model: "Claude Opus 4.6 (Thinking)", input: 160, cached: null, output: 40, total: 200 }
-      ]
-    }
-  };
-
-  assert.deepEqual(ModelUsage.buildMergedModels(snapshot).map((item) => item.model), ["Gemini 3.8 Flash (High)"]);
-  assert.equal(ModelUsage.mergeSourceTokens(snapshot, "antigravity").total, 100);
-  assert.equal(ModelUsage.mergeAllTokens(snapshot).total, 100);
+test("report aggregation preserves source selection and Gemini-only Antigravity totals", () => {
+  const items = [
+    {model:"gpt-6-sol",source:"codex",input:20,cached:5,output:10,total:30},
+    {model:"gemini-3.8-flash",source:"antigravity",input:80,cached:40,output:20,total:100,usageAccuracy:"native"},
+    {model:"claude-opus-5-5",source:"antigravity",input:160,cached:0,output:40,total:200}
+  ];
+  assert.equal(ModelUsage.mergeTokenItems(items,"merged").total,130);
+  assert.equal(ModelUsage.mergeTokenItems(items,"merged").cacheHitRate,45);
+  assert.deepEqual(ModelUsage.parseModelSelection("codex:gpt-6-sol"),{kind:"model",source:"codex",model:"gpt-6-sol"});
+  assert.deepEqual(ModelUsage.parseModelSelection("source:antigravity"),{kind:"source",source:"antigravity",model:"all"});
 });

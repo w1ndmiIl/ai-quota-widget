@@ -228,8 +228,8 @@ test("concurrent manual upgrades share one follow-up snapshot", async () => {
   let calls = 0;
   h.context.codex.readQuota = () => ++calls === 1 ? firstQuota.promise : Promise.resolve({ total: 2 });
   const automatic = h.context.readSnapshotOnce();
-  const first = h.context.readSnapshotOnce({ allowAntigravityStart: true });
-  const second = h.context.readSnapshotOnce({ allowAntigravityStart: true });
+  const first = h.context.readSnapshotOnce({ manual: true });
+  const second = h.context.readSnapshotOnce({ manual: true });
   firstQuota.resolve({ total: 1 });
   await Promise.all([automatic, first, second]);
   assert.equal(calls, 2);
@@ -246,13 +246,13 @@ test("history polling stops in compact/hidden mode and drops an invisible in-fli
     isCompact: true, document: { hidden: false }, historyRenderingEnabled: true,
     historyRenderTimer: null, historyRenderInFlight: false, historyRenderQueued: false,
     historyRenderQueuedImmediate: false, lastHistoryRenderAt: 0, HISTORY_RENDER_INTERVAL: 60_000,
-    dashboardControls: null, selectedModel: "claude:one", parseModelSelection: () => ({ source: "claude", model: "one" }),
-    window: { aiQuota: { readTokenHistory: () => { reads++; return history.promise; } } },
-    renderTrendWithData: () => { renders++; }, renderHeatmapWithData: () => { renders++; },
+    dashboardControls: { refresh() { reads++; return history.promise.then(() => {
+      if (!context.isCompact && !context.document.hidden) renders += 2;
+    }); } },
     setTimeout: (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; },
     clearTimeout: (id) => timers.delete(id)
   });
-  vm.runInContext(source.slice(source.indexOf("function cancelHistoryRender()"), source.indexOf("function mergeDailyMaps(")), context);
+  vm.runInContext(source.slice(source.indexOf("function cancelHistoryRender()"), source.indexOf("function renderTrendWithData(")), context);
   context.scheduleHistoryRender(true);
   assert.equal(timers.size, 0);
   context.isCompact = false;

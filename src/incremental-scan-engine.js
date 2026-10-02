@@ -137,7 +137,9 @@ function sweepDeletedFiles(state, retainDeleted) {
 function scanFilesIncrementally(filePaths, parseFile, {
   namespace = "default",
   retainDeleted = false,
-  retainLastValid = retainDeleted
+  retainLastValid = retainDeleted,
+  parserVersion = 0,
+  fileSignature = () => null
 } = {}) {
   const started = Date.now();
   let parsed = 0;
@@ -148,8 +150,10 @@ function scanFilesIncrementally(filePaths, parseFile, {
 
   for (const filePath of filePaths) {
     let stat;
+    let extraSignature;
     try {
       stat = fs.statSync(filePath);
+      extraSignature = fileSignature(filePath);
     } catch {
       failures++;
       continue;
@@ -157,7 +161,7 @@ function scanFilesIncrementally(filePaths, parseFile, {
 
     const { mtimeMs, size } = stat;
     const cachedItem = state.files[filePath];
-    if (cachedItem && cachedItem.mtimeMs === mtimeMs && cachedItem.size === size) {
+    if (cachedItem && (cachedItem.parserVersion || 0) === parserVersion && (cachedItem.extraSignature ?? null) === extraSignature && cachedItem.mtimeMs === mtimeMs && cachedItem.size === size) {
       if (cachedItem.deletedAt) {
         delete cachedItem.deletedAt;
         dirty = true;
@@ -173,7 +177,7 @@ function scanFilesIncrementally(filePaths, parseFile, {
         const known = new Set(data.map(key));
         data = [...data,...recoveredEvents.filter((event) => !known.has(key(event)))].sort((a,b)=>a.t-b.t);
       }
-      state.files[filePath] = { mtimeMs, size, data, ...(recoveredEvents ? { recoveredEvents } : {}) };
+      state.files[filePath] = { mtimeMs, size, data, ...(extraSignature !== null ? { extraSignature } : {}), ...(parserVersion ? { parserVersion } : {}), ...(recoveredEvents ? { recoveredEvents } : {}) };
       parsed++;
       dirty = true;
     } catch (error) {

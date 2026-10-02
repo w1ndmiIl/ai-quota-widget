@@ -5,6 +5,9 @@ node_modules/
 .agents/
 .userdata/
 .cache/
+backups/
+docs/audit-2026-10-01.md
+docs/folder-cleanup-2026-10-01.md
 dist/
 release/
 release-next/

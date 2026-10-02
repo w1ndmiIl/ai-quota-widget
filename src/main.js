@@ -1,11 +1,11 @@
 "use strict";
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, globalShortcut, screen, dialog, clipboard, Notification, shell } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, globalShortcut, screen } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const { chooseDataDirectory, visibleBounds, quotaNotices } = require("./desktop-preferences");
-const { sourceHealth } = require("./source-health");
-const { resolveRange, serializeReport } = require("./usage-report");
+const { chooseDataDirectory, visibleBounds } = require("./desktop-preferences");
+
+const { resolveRange } = require("./usage-report");
 const { loadAppConfig, normalizeAppConfig, persistAppConfig, sourceConfigChanged } = require("./app-config-store");
 const { AntigravityQuotaService } = require("./antigravity-quota-service");
 const { CodexService } = require("./codex-service");
@@ -116,7 +116,7 @@ function hotkeyRegistrations(hotkeys) {
   return [
     [hotkeys.togglePanel, toggleMainPanel],
     [hotkeys.toggleCompact, () => resizeWindow(!isCompact)],
-    [hotkeys.refresh, () => refreshAndPush({ allowAntigravityStart: true }).catch(() => {})],
+    [hotkeys.refresh, () => refreshAndPush({ manual: true }).catch(() => {})],
     [hotkeys.togglePin, toggleAlwaysOnTop]
   ].filter(([accelerator]) => accelerator);
 }
@@ -210,7 +210,7 @@ function createTray() {
       { label: "显示 / 隐藏", click: toggleMainPanel },
       { label: "切换紧凑模式", click: () => resizeWindow(!isCompact) },
       { label: "切换置顶", click: toggleAlwaysOnTop },
-      { label: "刷新数据", click: () => refreshAndPush({ allowAntigravityStart: true }).catch(() => {}) },
+      { label: "刷新数据", click: () => refreshAndPush({ manual: true }).catch(() => {}) },
       { type: "separator" },
       {
         label: "退出",
@@ -262,7 +262,7 @@ async function readCachedResetCredits() {
   return resetCreditsPending;
 }
 
-async function readSnapshot({ allowAntigravityStart = false, includeTokens = !isCompact } = {}) {
+async function readSnapshot({ manual = false, includeTokens = !isCompact } = {}) {
   const config = appConfig;
   const generation = usageCoordinator.generation;
   const current = () => !isQuitting && generation === usageCoordinator.generation;
@@ -310,7 +310,7 @@ async function readSnapshot({ allowAntigravityStart = false, includeTokens = !is
   }
   if (config.enableAntigravity) {
     tasks.push(read("antigravityQuota", () => antigravityQuota.readQuota({
-      allowStart: allowAntigravityStart, force: allowAntigravityStart
+      force: manual
     })));
     if (includeTokens) tasks.push(read("antigravityTokenUsage", () => usageCoordinator.readAntigravityUsage()));
   }
@@ -324,18 +324,18 @@ async function readSnapshot({ allowAntigravityStart = false, includeTokens = !is
   return snapshot;
 }
 
-async function readSnapshotOnce({ allowAntigravityStart = false } = {}) {
-  if (allowAntigravityStart && !snapshotInFlight) { usageCoordinator.clearCaches(); usageCoordinator.stop(true); }
+async function readSnapshotOnce({ manual = false } = {}) {
+  if (manual && !snapshotInFlight) { usageCoordinator.clearCaches(); usageCoordinator.stop(true); }
   const key = usageCoordinator.generation + ":" + isCompact;
   const existing = snapshotInFlight;
   if (existing && existing.key === key) {
-    if (!allowAntigravityStart || existing.allowStart) return existing.promise;
+    if (!manual || existing.manual) return existing.promise;
     try { await existing.promise; } catch {}
-    return readSnapshotOnce({ allowAntigravityStart });
+    return readSnapshotOnce({ manual });
   }
-  const flight = { key, allowStart: allowAntigravityStart };
+  const flight = { key, manual };
   snapshotInFlight = flight;
-  flight.promise = readSnapshot({ allowAntigravityStart }).finally(() => {
+  flight.promise = readSnapshot({ manual }).finally(() => {
     if (snapshotInFlight === flight) snapshotInFlight = null;
   });
   return flight.promise;
@@ -344,16 +344,16 @@ async function readSnapshotOnce({ allowAntigravityStart = false } = {}) {
 function startAntigravityQuotaRefresh() {
   if (antigravityQuotaTimer) return;
   antigravityQuotaTimer = setInterval(() => {
-    refreshRunningAntigravityQuota().catch(() => {});
+    refreshAntigravityQuota().catch(() => {});
   }, ANTIGRAVITY_QUOTA_REFRESH_MS);
   antigravityQuotaTimer.unref?.();
 }
 
-async function refreshRunningAntigravityQuota() {
+async function refreshAntigravityQuota() {
   if (!appConfig.enableAntigravity) return null;
   const generation = usageCoordinator.generation;
   const previous = antigravityQuota.getCachedQuota();
-  const next = await antigravityQuota.readQuota({ allowStart: false, force: true });
+  const next = await antigravityQuota.readQuota({ force: true });
   if (isQuitting || generation !== usageCoordinator.generation) return null;
   if (!next || next.updatedAt === previous?.updatedAt) return previous;
 
@@ -396,74 +396,25 @@ function resizeWindow(compact) {
 
 async function readUsageReport(options) {
   resolveRange(options.range);
+  const generation = usageCoordinator.generation;
   const sources = usageCoordinator.enabledLocalSources();
+  const enableAntigravity = appConfig.enableAntigravity;
   const selection = typeof options.selection === "string" ? options.selection : "all";
   if (options.force) await usageWorkerClient.request("invalidate");
-  const generation = usageCoordinator.generation;
-  const report = await usageWorkerClient.request("report", { range: options.range, selection, sources, enableAntigravity: appConfig.enableAntigravity, priceOverrides: {} });
+  if (generation !== usageCoordinator.generation) throw new Error("Settings changed; retry the report");
+  const report = await usageWorkerClient.request("report", { range: options.range, selection, sources, enableAntigravity });
   if (generation !== usageCoordinator.generation) throw new Error("Settings changed; retry the report");
   return report;
 }
 
-let noticeState = {};
-const noticeStatePath = path.join(userDataPath, "notification-state.json");
-try { noticeState = JSON.parse(fs.readFileSync(noticeStatePath, "utf8")); } catch {}
-function publishNotices(snapshot) {
-  if (!app.isReady() || snapshot.error || snapshot.stale) return;
-  const before = JSON.stringify(noticeState);
-  const notices = quotaNotices(snapshot, appConfig.notifications, noticeState);
-  if (before !== JSON.stringify(noticeState)) {
-    try { require("./atomic-json").writeJson(noticeStatePath, noticeState); } catch (error) { console.error(error); }
-  }
-  for (const item of notices) {
-    const english = appConfig.language === "en";
-    new Notification({ title: "AI_bar", body: english
-      ? item.source + " " + item.window + (item.kind === "low" ? " quota low: " : " quota recovered: ") + item.remaining + "%"
-      : item.source + " " + item.window + (item.kind === "low" ? " 额度偏低：" : " 额度已恢复：") + item.remaining + "%" }).show();
-  }
-}
-
 app.whenReady().then(() => {
-  ipcMain.handle("pricing:open", (_event, url) => {
-    if (!["https://openai.com/api/pricing/", "https://www.anthropic.com/pricing", "https://ai.google.dev/gemini-api/docs/pricing", "https://api-docs.deepseek.com/quick_start/pricing"].includes(url)) throw new Error("Unknown pricing source");
-    return shell.openExternal(url);
-  });
-  ipcMain.handle("sources:retry", async (_event, source) => {
-    if (![...usageCoordinator.enabledLocalSources(), ...(appConfig.enableAntigravity ? ["antigravity"] : [])].includes(source)) throw new Error("Source disabled");
-    await usageWorkerClient.request("invalidate");
-    const result = await usageWorkerClient.request(source === "antigravity" ? "antigravityUsage" : "localUsage", { sources: [source], refreshTtl: 0 });
-    const cached = snapshotStore.getCached();
-    if (cached) {
-      const sourceErrors = { ...cached.sourceErrors };
-      if (result.readError) sourceErrors[source] = result.readError; else delete sourceErrors[source];
-      snapshotStore.save({ ...cached, sourceErrors, sourceUpdatedAt: { ...cached.sourceUpdatedAt, ...(!result.readError ? { [source]: Date.now() } : {}) } });
-    }
-    return result;
-  });
   for (const event of ["display-removed", "display-metrics-changed"]) screen.on(event, () => { if (mainWindow) resizeWindow(isCompact); });
-  ipcMain.handle("sources:health", async () => {
-    const metrics = await usageWorkerClient.request("metrics");
-    return { dataDirectory: userDataPath, fallback: dataLocation.fallback, version: app.getVersion(), sources: sourceHealth(appConfig, snapshotStore.getCached(), { ...metrics, codex: metrics["codex-and-claude"], claude: metrics["codex-and-claude"] }) };
-  });
-  ipcMain.handle("diagnostics:copy", () => { clipboard.writeText(JSON.stringify({ version: app.getVersion(), sources: sourceHealth(appConfig, snapshotStore.getCached()) }, null, 2)); return true; });
-  ipcMain.handle("preferences:update", (_event, preferences) => {
-    const zoom = Math.max(0.8, Math.min(1.3, Number(preferences.zoom) || 1));
-    appConfig = normalizeAppConfig({ ...appConfig, zoom, notifications: preferences.notifications, priceOverrides: preferences.priceOverrides, language: preferences.language });
-    persistAppConfig(configPath, appConfig); if (mainWindow) resizeWindow(isCompact); return appConfig;
-  });
   ipcMain.handle("tokens:report", (_event, options = {}) => readUsageReport(options));
-  ipcMain.handle("report:export", async (_event, options = {}) => {
-    if (!["csv", "json"].includes(options.format)) throw new Error("Invalid export format");
-    const report = await readUsageReport(options);
-    const result = await dialog.showSaveDialog(mainWindow, { defaultPath: "AI_bar-usage." + options.format, filters: [{ name: options.format.toUpperCase(), extensions: [options.format] }] });
-    if (result.canceled || !result.filePath) return false;
-    await fs.promises.writeFile(result.filePath, serializeReport(report, options.format), "utf8"); return true;
-  });
   ipcMain.handle("quota:cached", () => snapshotStore.getCached());
   // The invoking renderer already receives the returned snapshot; broadcasting
   // it as well would render every refresh twice.
   ipcMain.handle("quota:refresh", (_event, options) => readSnapshotOnce({
-    allowAntigravityStart: options?.manual === true
+    manual: options?.manual === true
   }));
   ipcMain.handle("window:toggleAlwaysOnTop", toggleAlwaysOnTop);
   ipcMain.handle("window:quit", () => {
@@ -471,34 +422,6 @@ app.whenReady().then(() => {
     return true;
   });
   ipcMain.handle("window:setCompact", (_event, compact) => resizeWindow(Boolean(compact)));
-  ipcMain.handle("tokens:history", async (_event, model, sourceFilter) => {
-    try {
-      if (sourceFilter === "codex" && !appConfig.enableCodex) return { daily: {}, hourly: [] };
-      if (sourceFilter === "claude" && !appConfig.enableClaudeCode) return { daily: {}, hourly: [] };
-      if (sourceFilter === "opencode" && !appConfig.enableOpenCode) return { daily: {}, hourly: [] };
-      if (sourceFilter === "gemini" && !appConfig.enableGeminiCli) return { daily: {}, hourly: [] };
-      if (sourceFilter === "cline" && !appConfig.enableCline) return { daily: {}, hourly: [] };
-      if (!sourceFilter && !usageCoordinator.enabledLocalSources().length) return { daily: {}, hourly: [] };
-      return await usageCoordinator.readHistory("local", model, sourceFilter);
-    } catch {
-      return { daily: {}, hourly: [] };
-    }
-  });
-  ipcMain.handle("antigravity:history", async (_event, model) => {
-    try {
-      if (!appConfig.enableAntigravity) return { daily: {}, hourly: [] };
-      return await usageCoordinator.readHistory("antigravity", model);
-    } catch {
-      return { daily: {}, hourly: [] };
-    }
-  });
-  ipcMain.handle("tokens:cumulative", async (_event, selection) => {
-    try {
-      return await usageCoordinator.readCumulative(selection);
-    } catch {
-      return null;
-    }
-  });
   ipcMain.handle("settings:read", () => appConfig);
   ipcMain.handle("settings:update", (_event, newConfig) => {
     const previousConfig = appConfig;

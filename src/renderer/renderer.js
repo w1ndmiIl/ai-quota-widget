@@ -1,6 +1,6 @@
 "use strict";
 
-const { buildMergedModels, getTokenForModel, parseModelSelection } = window.ModelUsage;
+const { parseModelSelection } = window.ModelUsage;
 const { createModalController, nextRovingIndex } = window.UiInteractions;
 
 const elements = {
@@ -81,7 +81,7 @@ const elements = {
 const modalController = createModalController({ background: elements.shell });
 
 let isCompact = localStorage.getItem("compact") === "1";
-let tokenRange = localStorage.getItem("tokenRange") || "24h";
+
 let quotaMode = localStorage.getItem("quotaMode") === "antigravity" ? "antigravity" : "codex";
 let isRefreshing = false;
 let queuedRefresh = null;
@@ -92,14 +92,14 @@ let currentReport = null;
 let selectedModel = localStorage.getItem("selectedModel") || "all";
 let tokenRenderGeneration = 0;
 const chartSeries = new Map();
-const HISTORY_VERSION = "2";
+
 const DEFAULT_HOTKEYS = Object.freeze({
   togglePanel: "Ctrl+Shift+Space",
   toggleCompact: "Ctrl+Shift+M",
   refresh: "",
   togglePin: ""
 });
-let history = readHistory();
+
 let mergedModels = [];
 let selectableModelSources = new Set();
 let latestResetCredits = [];
@@ -122,7 +122,7 @@ let historyRenderingEnabled = false;
 const HISTORY_RENDER_INTERVAL = 60_000;
 const modelMeasureCanvas = document.createElement("canvas");
 let modelMenuSignature = "";
-let toggleSliderFrame = null;
+
 let chartTooltipFrame = null;
 let pendingChartTooltip = null;
 
@@ -189,10 +189,6 @@ async function loadInitialData() {
     await refresh();
   } finally {
     initialDataReady = true;
-    if (!isCompact && tokenRange === "cumulative" && lastSnapshot) {
-      const tokenData = getTokenForModel(lastSnapshot, selectedModel);
-      await renderTokenStats(tokenData, mergedModels, ++tokenRenderGeneration);
-    }
     historyRenderingEnabled = true;
     const renderWhenIdle = () => scheduleHistoryRender(true);
     if (window.requestIdleCallback) window.requestIdleCallback(renderWhenIdle, { timeout: 2_000 });
@@ -434,17 +430,15 @@ const I18N = {
     heatTitle: "每日Token消耗",
     hitRate: "命中率分析",
     token24h: "近 24h Token",
-    cumulativeToken: "累计 Token",
-    cumulative: "累计",
     localSession: "本地会话",
     apiData: "接口数据",
     estimated: "估算",
+    nativeUsage: "原生统计",
+    mixedUsage: "含旧会话估算",
     tokenInput: "输入",
     tokenCache: "缓存",
     tokenOutput: "输出",
     tokenValue: "API 估值",
-    customTokenValue: "API 估值（自定义）",
-    customTokenValueHint: "按你填写的自定义单价估算，不代表订阅账单。",
     tokenValueHint: "按标准文本 API 公开价格估算；不含长上下文、区域、工具调用及缓存存储附加费，不代表订阅实际账单。",
     tokenValuePartial: (models) => `仅包含已识别模型；未计价：${models}`,
     tokenValueUnavailable: "当前模型没有可用的公开 API 单价。",
@@ -481,7 +475,7 @@ const I18N = {
     labelOpenCode: "OpenCode 本地会话",
     labelGeminiCli: "Gemini CLI 本地会话",
     labelCline: "Cline 本地日志",
-    labelAntigravity: "Antigravity 额度与会话估算",
+    labelAntigravity: "Antigravity 额度与原生 Token",
     hotkeySectionTitle: "快捷键",
     hotkeyHint: "点击输入框后按下组合键；留空可关闭对应快捷键。",
     hotkeyTogglePanel: "显示 / 隐藏主面板",
@@ -503,7 +497,7 @@ const I18N = {
     refreshFailed: "读取失败",
     expireUnknown: "到期未知",
     resetCards: "重置卡",
-    shortLabel: "5小时",
+    shortLabel: "5h限额",
     weekLabel: "周限额",
     remaining: "剩余",
     unlimited: "无限制",
@@ -561,17 +555,15 @@ const I18N = {
     heatTitle: "Daily Token Usage",
     hitRate: "Cache Hit Rate",
     token24h: "24h Tokens",
-    cumulativeToken: "Cumulative Tokens",
-    cumulative: "Cumulative",
     localSession: "Local Sessions",
     apiData: "API Data",
     estimated: "Estimate",
+    nativeUsage: "Native usage",
+    mixedUsage: "Includes legacy estimates",
     tokenInput: "Input",
     tokenCache: "Cache",
     tokenOutput: "Output",
     tokenValue: "API value",
-    customTokenValue: "API value (custom)",
-    customTokenValueHint: "Estimated using your custom rates; not a subscription charge.",
     tokenValueHint: "Estimated from public standard text API prices; excludes long-context, regional, tool, and cache-storage surcharges, and is not your subscription bill.",
     tokenValuePartial: (models) => `Known models only; not priced: ${models}`,
     tokenValueUnavailable: "No public API price is available for the current model.",
@@ -608,7 +600,7 @@ const I18N = {
     labelOpenCode: "OpenCode Local Sessions",
     labelGeminiCli: "Gemini CLI Local Sessions",
     labelCline: "Cline Local Logs",
-    labelAntigravity: "Antigravity Quota & Session Estimates",
+    labelAntigravity: "Antigravity Quota & Native Tokens",
     hotkeySectionTitle: "Shortcuts",
     hotkeyHint: "Click an input, then press a key combination. Leave it empty to disable that shortcut.",
     hotkeyTogglePanel: "Show / hide main panel",
@@ -630,7 +622,7 @@ const I18N = {
     refreshFailed: "Refresh failed",
     expireUnknown: "Unknown",
     resetCards: "Resets",
-    shortLabel: "5 Hours",
+    shortLabel: "5h limit",
     weekLabel: "Weekly",
     remaining: "Remaining",
     unlimited: "Unlimited",
@@ -684,7 +676,7 @@ renderBar(elements.longBar, 0, "gray");
 applyPinnedState(true);
 applyCompactState(isCompact);
 if (isCompact) window.aiQuota.setCompact(true);
-setupTokenRangeToggle();
+
 generateAndSaveTrayIcon();
 loadInitialData();
 
@@ -735,7 +727,6 @@ function applyLang(lang) {
     setExpandableCard("hitRateCard", "hitRate");
     setExpandableCard("trendCard", "trendTitle");
     setExpandableCard("heatCard", "heatTitle");
-    set("cumulativeRangeButton", "cumulative");
     set("hitRateTitle", "hitRate");
     set("trendTitle", "trendTitle");
     set("trendDelta", "trendRange");
@@ -763,6 +754,8 @@ function applyLang(lang) {
     setTitleAndAria("settingsClose", "settingsClose");
     set("shortLabel", "shortLabel");
     set("longLabel", "weekLabel");
+    set("ringShortLabel", "shortLabel");
+    set("ringLongLabel", "weekLabel");
     set("tokenValueLabel", "tokenValue");
     set("themeChoiceLight", "themeLight");
     set("themeChoiceDark", "themeDark");
@@ -941,92 +934,15 @@ function render(snapshot) {
     elements.updatedAt.title = snapshot?.error ?? "";
 
     renderQuotaContext(snapshot);
-    if (!snapshot?.stale) recordHistory(quota);
+
     dashboardControls?.updateSnapshot(snapshot);
     if (isCompact || document.hidden) return;
-    if (dashboardControls?.active) { dashboardControls.refresh(); return; }
-    mergedModels = buildMergedModels(snapshot);
-    selectableModelSources = new Set(mergedModels.map((model) => model.source).filter(Boolean));
-    if (snapshot?.config?.enableAntigravity && (snapshot?.antigravityQuota || snapshot?.antigravityTokenUsage)) {
-      selectableModelSources.add("antigravity");
-    }
-    const tokenData = getTokenForModel(snapshot, selectedModel);
-    renderTokenStats(tokenData, mergedModels, ++tokenRenderGeneration);
-    scheduleHistoryRender();
+    dashboardControls.refresh();
   } catch (e) {
     elements.updatedAt.textContent = "ERR:" + (e.message || "").slice(0, 30);
     elements.updatedAt.classList.add("error");
   }
 }
-
-function setupTokenRangeToggle() {
-  const toggle = elements.tokenRangeToggle;
-  if (!toggle) return;
-  const buttons = toggle.querySelectorAll(".range-btn");
-  
-  buttons.forEach((btn) => {
-    const range = btn.dataset.range;
-    if (range === tokenRange) {
-      btn.classList.add("active");
-      btn.setAttribute("aria-pressed", "true");
-    } else {
-      btn.classList.remove("active");
-      btn.setAttribute("aria-pressed", "false");
-    }
-  });
-
-  setTimeout(updateToggleSlider, 100);
-  window.addEventListener("resize", scheduleToggleSliderUpdate);
-
-  buttons.forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const range = btn.dataset.range;
-      if (range === tokenRange) return;
-      const renderId = ++tokenRenderGeneration;
-
-      tokenRange = range;
-      localStorage.setItem("tokenRange", range);
-
-      buttons.forEach((b) => {
-        const active = b === btn;
-        b.classList.toggle("active", active);
-        b.setAttribute("aria-pressed", String(active));
-      });
-      
-      updateToggleSlider();
-
-      elements.tokenCardBody.classList.add("switching");
-      await new Promise((resolve) => setTimeout(resolve, 220));
-
-      if (lastSnapshot && renderId === tokenRenderGeneration) {
-        const tokenData = getTokenForModel(lastSnapshot, selectedModel);
-        await renderTokenStats(tokenData, mergedModels, renderId);
-      }
-
-      elements.tokenCardBody.classList.remove("switching");
-    });
-  });
-}
-
-function updateToggleSlider() {
-  const toggle = elements.tokenRangeToggle;
-  if (!toggle) return;
-  const activeBtn = toggle.querySelector(".range-btn.active");
-  const slider = toggle.querySelector(".range-slider");
-  if (slider && activeBtn) {
-    slider.style.width = `${activeBtn.offsetWidth}px`;
-    slider.style.transform = `translateX(${activeBtn.offsetLeft}px)`;
-  }
-}
-
-function scheduleToggleSliderUpdate() {
-  if (toggleSliderFrame) return;
-  toggleSliderFrame = requestAnimationFrame(() => {
-    toggleSliderFrame = null;
-    updateToggleSlider();
-  });
-}
-
 
 function setupModelSelect() {
   const picker = document.createElement("div");
@@ -1204,27 +1120,23 @@ function buildModelOption(item) {
     localStorage.setItem("selectedModel", selectedModel);
     closeModelPicker({ restoreFocus: true });
     syncModelSelect(mergedModels);
-    if (dashboardControls?.active) { dashboardControls.invalidate(); dashboardControls.refresh(); return; }
-    if (lastSnapshot) {
-      const data = getTokenForModel(lastSnapshot, selectedModel);
-      renderTokenStats(data, mergedModels, ++tokenRenderGeneration);
-    }
-    scheduleHistoryRender(true);
+    dashboardControls.invalidate();
+    dashboardControls.refresh();
   });
   return option;
 }
 
 function sourceLabel(stats) {
   if (!stats) return t("noData");
-  const suffix = tokenRange === "cumulative" ? ` · ${t("cumulative")}` : "";
-  if (stats.source === "codex") return "Codex" + suffix;
-  if (stats.source === "claude") return "Claude Code" + suffix;
-  if (stats.source === "opencode") return "OpenCode" + suffix;
-  if (stats.source === "gemini") return "Gemini CLI" + suffix;
-  if (stats.source === "cline") return "Cline" + suffix;
-  if (stats.source === "antigravity") return `Antigravity · ${t("estimated")}${suffix}`;
-  if (stats.source === "merged") return t("allSources") + suffix;
-  return (stats.source === "localSessions" || stats.source === "localModel" ? t("localSession") : t("apiData")) + suffix;
+
+  if (stats.source === "codex") return "Codex";
+  if (stats.source === "claude") return "Claude Code";
+  if (stats.source === "opencode") return "OpenCode";
+  if (stats.source === "gemini") return "Gemini CLI";
+  if (stats.source === "cline") return "Cline";
+  if (stats.source === "antigravity") return `Antigravity · ${t(stats.usageAccuracy === "native" ? "nativeUsage" : stats.usageAccuracy === "mixed" ? "mixedUsage" : "estimated")}`;
+  if (stats.source === "merged") return t("allSources");
+  return (stats.source === "localSessions" || stats.source === "localModel" ? t("localSession") : t("apiData"));
 }
 
 function visibleModelPickerItems() {
@@ -1275,53 +1187,43 @@ function closeModelPicker({ restoreFocus = false } = {}) {
   if (restoreFocus) elements.modelPickerTrigger.focus({ preventScroll: true });
 }
 
-function localizedQuotaLabel(quotaWindow, fallbackLabel) {
-  if (quotaWindow?.durationMins === 300) return t("shortLabel");
-  if (quotaWindow?.durationMins === 10080) return t("weekLabel");
-  return quotaWindow?.label || fallbackLabel;
-}
-
-function renderWindow(prefix, quotaWindow, fallbackLabel, hideWhenMissing = true, options = {}) {
-  const unlimited = options.unlimitedWhenMissing && !quotaWindow;
+function renderWindow(prefix, quotaWindow, label, hasQuota) {
+  const unlimited = hasQuota && !quotaWindow;
   const metric = elements[`${prefix}Metric`];
-  if (metric) metric.hidden = hideWhenMissing && !quotaWindow && !unlimited;
+  if (metric) metric.hidden = false;
   const percent = unlimited ? 100 : quotaWindow?.remainingPercent;
   const tone = toneForPercent(percent);
-  elements[`${prefix}Label`].textContent = localizedQuotaLabel(quotaWindow, fallbackLabel);
+  elements[`${prefix}Label`].textContent = label;
   elements[`${prefix}Value`].textContent = unlimited ? "∞" : percent == null ? "--%" : `${percent}%`;
-  elements[`${prefix}Reset`].textContent = unlimited
-    ? t("unlimited")
-    : quotaWindow?.resetsAt ? formatDateTime(quotaWindow.resetsAt) : t("waitingData");
-  elements[`${prefix}Reset`].title = quotaWindow?.resetsAt ? formatDateTime(quotaWindow.resetsAt) : "";
-  elements[`${prefix}ResetCompact`].textContent = unlimited
-    ? "∞"
-    : quotaWindow?.resetsAt ? formatCompactDate(quotaWindow.resetsAt) : "--";
+  elements[`${prefix}Reset`].textContent = unlimited ? "∞" : quotaWindow?.resetsAt ? formatDateTime(quotaWindow.resetsAt) : t("waitingData");
+  elements[`${prefix}Reset`].title = unlimited ? t("unlimited") : quotaWindow?.resetsAt ? formatDateTime(quotaWindow.resetsAt) : "";
+  elements[`${prefix}ResetCompact`].textContent = unlimited ? "∞" : quotaWindow?.resetsAt ? formatCompactDate(quotaWindow.resetsAt) : "--";
   renderBar(elements[`${prefix}Bar`], percent, tone);
 }
 
 function renderRing(windows, hasQuota) {
-  const shortWindow = windows?.ringShortWindow;
-  const longWindow = windows?.ringLongWindow;
-  const short = shortWindow?.remainingPercent;
-  const long = longWindow?.remainingPercent;
-  const hasShort = Boolean(shortWindow) || !hasQuota;
-  const hasLong = Boolean(longWindow) || !hasQuota;
-  elements.shortRingTrack.style.display = hasShort ? "" : "none";
-  elements.shortRingArc.style.display = hasShort ? "" : "none";
-  elements.longRingTrack.style.display = hasLong ? "" : "none";
-  elements.longRingArc.style.display = hasLong ? "" : "none";
-  elements.ringShortValue.hidden = !hasShort;
-  elements.ringLongValue.hidden = !hasLong;
-  elements.ringShort.textContent = short == null ? "--%" : `${short}%`;
-  elements.ringLong.textContent = long == null ? "--%" : `${long}%`;
-  elements.ringShortLabel.textContent = compactWindowLabel(shortWindow, "5h");
-  elements.ringLongLabel.textContent = compactWindowLabel(longWindow, t("weekLabel"));
-  elements.shortResetCompact.textContent = shortWindow?.resetsAt ? formatCompactDate(shortWindow.resetsAt) : "--";
-  elements.longResetCompact.textContent = longWindow?.resetsAt ? formatCompactDate(longWindow.resetsAt) : "--";
+  const shortWindow = windows?.shortWindow;
+  const longWindow = windows?.longWindow;
+  const unlimitedShort = hasQuota && !shortWindow;
+  const unlimitedLong = hasQuota && !longWindow;
+  const short = unlimitedShort ? 100 : shortWindow?.remainingPercent;
+  const long = unlimitedLong ? 100 : longWindow?.remainingPercent;
+  elements.shortRingTrack.style.display = "";
+  elements.shortRingArc.style.display = "";
+  elements.longRingTrack.style.display = "";
+  elements.longRingArc.style.display = "";
+  elements.ringShortValue.hidden = false;
+  elements.ringLongValue.hidden = false;
+  elements.ringShort.textContent = unlimitedShort ? "∞" : short == null ? "--%" : `${short}%`;
+  elements.ringLong.textContent = unlimitedLong ? "∞" : long == null ? "--%" : `${long}%`;
+  elements.ringShortLabel.textContent = t("shortLabel");
+  elements.ringLongLabel.textContent = t("weekLabel");
+  elements.shortResetCompact.textContent = unlimitedShort ? "∞" : shortWindow?.resetsAt ? formatCompactDate(shortWindow.resetsAt) : "--";
+  elements.longResetCompact.textContent = unlimitedLong ? "∞" : longWindow?.resetsAt ? formatCompactDate(longWindow.resetsAt) : "--";
   elements.shortRingArc.style.strokeDasharray = `${clamp(short ?? 0)} 100`;
   elements.longRingArc.style.strokeDasharray = `${clamp(long ?? 0)} 100`;
-  elements.shortRingArc.setAttribute("aria-label", `${elements.ringShortLabel.textContent} ${t("remaining")} ${short ?? "--"}%`);
-  elements.longRingArc.setAttribute("aria-label", `${elements.ringLongLabel.textContent} ${t("remaining")} ${long ?? "--"}%`);
+  elements.shortRingArc.setAttribute("aria-label", `${elements.ringShortLabel.textContent} ${unlimitedShort ? t("unlimited") : `${t("remaining")} ${short ?? "--"}%`}`);
+  elements.longRingArc.setAttribute("aria-label", `${elements.ringLongLabel.textContent} ${unlimitedLong ? t("unlimited") : `${t("remaining")} ${long ?? "--"}%`}`);
 }
 
 function getDisplayWindows(quota) {
@@ -1329,17 +1231,8 @@ function getDisplayWindows(quota) {
   const longWindow = quota?.longWindow ?? null;
   return {
     shortWindow,
-    longWindow,
-    ringShortWindow: shortWindow ?? longWindow,
-    ringLongWindow: shortWindow ? longWindow : null
+    longWindow
   };
-}
-
-function compactWindowLabel(window, fallback) {
-  const minutes = window?.durationMins;
-  if (minutes === 300) return "5h";
-  if (minutes === 10080) return "7d";
-  return window?.label || fallback;
 }
 
 function renderResetCredits(resetCredits, resetCard) {
@@ -1376,13 +1269,7 @@ function renderQuotaContext(snapshot) {
   elements.quotaSide.setAttribute("aria-label", aria);
 
   const windows = getDisplayWindows(quota);
-  renderWindow(
-    "short",
-    windows.shortWindow,
-    t("shortLabel"),
-    Boolean(quota),
-    { unlimitedWhenMissing: !antigravityMode && Boolean(quota?.longWindow && !quota?.shortWindow) }
-  );
+  renderWindow("short", windows.shortWindow, t("shortLabel"), Boolean(quota));
   renderWindow("long", windows.longWindow, t("weekLabel"), Boolean(quota));
   renderRing(windows, Boolean(quota));
 
@@ -1455,47 +1342,9 @@ function resetStatusLabel(status) {
   return status || t("unknownStatus");
 }
 
-async function renderTokenStats(stats, modelUsage, renderId) {
+function renderTokenStats(stats, modelUsage, renderId) {
   if (isCompact || document.hidden || renderId !== tokenRenderGeneration) return;
   syncModelSelect(modelUsage);
-
-  let displayStats = stats;
-  let titleText = t("token24h");
-
-  if (tokenRange === "cumulative") {
-    titleText = t("cumulativeToken");
-    if (!initialDataReady) {
-      displayStats = null;
-    } else {
-      try {
-        const cumStats = await window.aiQuota.readCumulativeTokens(selectedModel);
-        if (renderId !== tokenRenderGeneration) return;
-        if (cumStats) {
-          displayStats = {
-            ...cumStats,
-            source: parseModelSelection(selectedModel).source || (selectedModel === "all" ? "merged" : null),
-            cacheHitRate: cumStats.cacheHitRate ?? ((cumStats.cached == null || cumStats.input === 0) ? null : Math.round((cumStats.cached / cumStats.input) * 100))
-          };
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }
-  } else {
-    if (renderId !== tokenRenderGeneration) return;
-    const selectedUsage = selectedModel === "all" ? null : modelUsage?.find((item) => item.currentUsage && (item.sourceModel || item.model) === selectedModel);
-    if (selectedUsage) {
-      displayStats = {
-        ...stats,
-        ...selectedUsage,
-        source: selectedUsage.source || "localModel",
-        cacheHitRate: (selectedUsage.cached == null || selectedUsage.input === 0) ? null : Math.round((selectedUsage.cached / selectedUsage.input) * 100)
-      };
-    }
-  }
-
-  elements.tokenCardTitle.textContent = titleText;
-  stats = displayStats;
 
   const hasTokenData =
     typeof stats?.input === "number" ||
@@ -1509,6 +1358,7 @@ async function renderTokenStats(stats, modelUsage, renderId) {
   const hitRate = stats?.cacheHitRate;
 
   elements.totalTokens.textContent = hasTokenData ? formatToken(total) : "--";
+  elements.totalTokens.title = sourceLabel(stats);
   elements.inputTokens.textContent = typeof stats?.input === "number" ? formatToken(input) : "--";
   elements.cachedTokens.textContent = typeof stats?.cached === "number" ? formatToken(cached) : "--";
   elements.outputTokens.textContent = typeof stats?.output === "number" ? formatToken(output) : "--";
@@ -1549,8 +1399,7 @@ async function renderTokenStats(stats, modelUsage, renderId) {
 }
 
 function renderTokenValue(stats, hasTokenData) {
-  const custom = stats?.customPrice || stats?.modelUsage?.some((item) => item.customPrice);
-  elements.tokenValueLabel.textContent = t(custom ? "customTokenValue" : "tokenValue");
+  elements.tokenValueLabel.textContent = t("tokenValue");
   const estimate = hasTokenData ? window.TokenPricing?.estimateTokenCost(stats) : null;
   if (!estimate?.pricedModels) {
     elements.tokenValue.textContent = "--";
@@ -1562,7 +1411,7 @@ function renderTokenValue(stats, hasTokenData) {
   const formattedValue = window.TokenPricing.formatUsd(estimate.usd);
   elements.tokenValue.textContent = `≈ ${formattedValue}${estimate.complete ? "" : "+"}`;
   elements.tokenValueBox.classList.remove("unavailable");
-  elements.tokenValueBox.title = custom ? t("customTokenValueHint") : estimate.complete
+  elements.tokenValueBox.title = estimate.complete
     ? t("tokenValueHint")
     : `${t("tokenValueHint")} ${t("tokenValuePartial", estimate.unknownModels.join(", "))}`;
 }
@@ -1570,26 +1419,6 @@ function renderTokenValue(stats, hasTokenData) {
 function renderBar(bar, percent, tone) {
   bar.className = tone;
   bar.style.width = `${percent ?? 0}%`;
-}
-
-function recordHistory(quota) {
-  const short = quota?.shortWindow?.remainingPercent;
-  const long = quota?.longWindow?.remainingPercent;
-  const token = quota?.tokenStats?.total;
-  const hit = quota?.tokenStats?.cacheHitRate;
-  if (short == null && long == null && token == null && hit == null) {
-    return;
-  }
-  const last = history.at(-1);
-  const now = Date.now();
-  const entry = { t: now, short, long, token, hit };
-  if (last && now - last.t < 60_000) {
-    history[history.length - 1] = entry;
-  } else {
-    history.push(entry);
-  }
-  history = history.slice(-288);
-  localStorage.setItem("quotaHistory", JSON.stringify(history));
 }
 
 function cancelHistoryRender() {
@@ -1633,75 +1462,7 @@ function scheduleHistoryRender(immediate = false) {
 }
 
 async function renderHistory() {
-  if (isCompact || document.hidden) return;
-  if (dashboardControls?.active) { await dashboardControls.refresh(); return; }
-  const modelForRender = selectedModel;
-  let daily = {};
-  let hourly = [];
-
-  if (modelForRender === "all") {
-    try {
-      const [codexData, agData] = await Promise.allSettled([
-        window.aiQuota.readTokenHistory("all"),
-        window.aiQuota.readAntigravityHistory("all")
-      ]);
-      daily = mergeDailyMaps(
-        codexData.status === "fulfilled" ? codexData.value.daily : {},
-        agData.status === "fulfilled" ? agData.value.daily : {}
-      );
-      hourly = mergeHourlyBuckets(
-        codexData.status === "fulfilled" ? codexData.value.hourly : [],
-        agData.status === "fulfilled" ? agData.value.hourly : []
-      );
-    } catch {
-      daily = {};
-      hourly = [];
-    }
-  } else {
-    const selection = parseModelSelection(modelForRender);
-    try {
-      let historyData;
-      if (selection.source === "antigravity") {
-        historyData = await window.aiQuota.readAntigravityHistory(selection.model);
-      } else {
-        historyData = await window.aiQuota.readTokenHistory(selection.model, selection.source);
-      }
-      daily = historyData.daily;
-      hourly = historyData.hourly;
-    } catch {
-      daily = {};
-      hourly = [];
-    }
-  }
-
-  if (isCompact || document.hidden || modelForRender !== selectedModel) return;
-  renderTrendWithData(daily, hourly);
-  renderHeatmapWithData(daily);
-}
-
-function mergeDailyMaps(...maps) {
-  const result = {};
-  for (const map of maps) {
-    for (const [key, val] of Object.entries(map)) {
-      if (!result[key]) result[key] = { input: 0, cached: 0, output: 0, reasoning: 0, total: 0 };
-      result[key].input += val.input || 0;
-      result[key].cached += val.cached || 0;
-      result[key].output += val.output || 0;
-      result[key].reasoning += val.reasoning || 0;
-      result[key].total += val.total || 0;
-    }
-  }
-  return result;
-}
-
-function mergeHourlyBuckets(...bucketArrays) {
-  const buckets = new Map();
-  for (const values of bucketArrays) for (const value of values) {
-    if (!buckets.has(value.t)) buckets.set(value.t, { t: value.t, input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 });
-    const bucket = buckets.get(value.t);
-    for (const key of ["input", "cached", "cacheWrite", "output", "reasoning", "total"]) bucket[key] += value[key] || 0;
-  }
-  return [...buckets.values()].sort((a,b) => a.t-b.t);
+  if (!isCompact && !document.hidden) await dashboardControls.refresh();
 }
 
 function renderTrendWithData(daily, hourly) {
@@ -2002,20 +1763,6 @@ function clearCardFocus() {
   focusedCard = null;
 }
 
-function readHistory() {
-  try {
-    if (localStorage.getItem("quotaHistoryVersion") !== HISTORY_VERSION) {
-      localStorage.setItem("quotaHistoryVersion", HISTORY_VERSION);
-      localStorage.removeItem("quotaHistory");
-      return [];
-    }
-    const value = JSON.parse(localStorage.getItem("quotaHistory") || "[]");
-    return Array.isArray(value) ? value.slice(-288) : [];
-  } catch {
-    return [];
-  }
-}
-
 function toneForPercent(percent) {
   if (percent == null) {
     return "gray";
@@ -2140,12 +1887,13 @@ function generateAndSaveTrayIcon() {
 
 function renderUsageReport(report, title) {
   currentReport = report;
-  tokenRange = "24h";
+
   const previousSelection = selectedModel;
   mergedModels = report.catalog.map((item) => ({ ...item, sourceModel: item.source + ":" + item.model, currentUsage: false }));
   selectableModelSources = new Set(mergedModels.map((item) => item.source));
-  const stats = window.ModelUsage.mergeTokenItems(report.models, "merged");
-  renderTokenStats(stats, mergedModels, ++tokenRenderGeneration).then(() => { elements.tokenCardTitle.textContent = title + " Token"; });
+  const stats = window.ModelUsage.mergeTokenItems(report.models, parseModelSelection(selectedModel).source || "merged");
+  renderTokenStats(stats, mergedModels, ++tokenRenderGeneration);
+  elements.tokenCardTitle.textContent = title + " Token";
   if (previousSelection !== selectedModel) { dashboardControls.invalidate(); dashboardControls.refresh(); return; }
   const context = report.contextHistory || report.history;
   renderTrendWithData(context.daily, report.history.hourly);
